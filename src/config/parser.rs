@@ -22,6 +22,7 @@ pub fn parse_config(text: &str) -> Result<DhcpConfig, String> {
     let mut dns: Vec<Ipv4Addr> = Vec::new();
     let mut lease_time: Option<u32> = None;
     let mut lease_file: Option<String> = None;
+    let mut allow_unbound = false;
     let mut statics: Vec<StaticLease> = Vec::new();
 
     for (idx, raw) in text.lines().enumerate() {
@@ -61,6 +62,7 @@ pub fn parse_config(text: &str) -> Result<DhcpConfig, String> {
                 )
             }
             "lease_file" => lease_file = Some(value.to_string()),
+            "allow_unbound" => allow_unbound = at(lineno, parse_bool(value))?,
             "static" => statics.push(at(lineno, parse_static(value))?),
             other => return Err(format!("line {}: unknown key '{}'", lineno, other)),
         }
@@ -77,6 +79,7 @@ pub fn parse_config(text: &str) -> Result<DhcpConfig, String> {
         dns,
         lease_time: required(lease_time, "lease_time")?,
         lease_file: required(lease_file, "lease_file")?,
+        allow_unbound,
         statics,
     })
 }
@@ -103,6 +106,14 @@ fn at<T>(lineno: usize, r: Result<T, String>) -> Result<T, String> {
 
 fn required<T>(v: Option<T>, name: &str) -> Result<T, String> {
     v.ok_or_else(|| format!("missing required key '{}'", name))
+}
+
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("expected 'true' or 'false', got '{}'", other)),
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +189,18 @@ static=printer,11:22:33:44:55:66,192.168.10.11
         let text = "static=onlyname\n";
         let err = parse_config(text).unwrap_err();
         assert!(err.contains("static must be"));
+    }
+
+    #[test]
+    fn allow_unbound_defaults_false_and_parses_true() {
+        assert!(!parse_config(SAMPLE).unwrap().allow_unbound);
+        let text = format!("{}allow_unbound=true\n", SAMPLE);
+        assert!(parse_config(&text).unwrap().allow_unbound);
+    }
+
+    #[test]
+    fn invalid_allow_unbound_is_error() {
+        let err = parse_config("allow_unbound=maybe\n").unwrap_err();
+        assert!(err.contains("true") && err.contains("false"));
     }
 }

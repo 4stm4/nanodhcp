@@ -55,6 +55,7 @@ Simple line-based `key=value`. See [`examples/nanodhcp.conf`](examples/nanodhcp.
 | `dns`         | comma-separated DNS servers (option 6), optional    |
 | `lease_time`  | lease duration in seconds (option 51)               |
 | `lease_file`  | path to the dynamic lease database                  |
+| `allow_unbound` | `true` keeps serving on 0.0.0.0 if interface binding fails; default `false` (fail-fast) |
 | `static`      | fixed binding `name,mac,ip` (repeatable)            |
 
 Comments start with `#`; blank lines are ignored; unknown keys are an error.

@@ -15,13 +15,19 @@ client                         nanodhcp
 ```
 
 - A `DHCPREQUEST` carrying a server identifier (option 54) that is **not**
-  this server is ignored — another server owns that exchange.
+  this server is ignored — another server owns that exchange (SELECTING).
+- A `DHCPREQUEST` *without* a server identifier (INIT-REBOOT) from a client we
+  have no dynamic lease or static binding for is also ignored, per RFC 2131
+  §4.3.2 — a server that knows the client should answer instead.
 - If the requested address is not the one we would grant, the server replies
   with `DHCPNAK`.
 - `DHCPRELEASE` drops the dynamic lease for that MAC. `DHCPDECLINE` is logged
   and the lease dropped (no conflict table in v0.1).
 - Replies are sent to the limited broadcast address `255.255.255.255:68`.
   There is no relay support, so `giaddr` is expected to be zero.
+
+> v0.1 covers the common SELECTING and INIT-REBOOT request paths; the full
+> RENEWING / REBINDING unicast state matrix is not yet modelled.
 
 ## Packet structure
 

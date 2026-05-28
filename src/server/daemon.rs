@@ -68,8 +68,9 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
         }
 
         DhcpMessageType::Request => {
-            // If the client selected a specific server (option 54) that is not
-            // us, stay silent — another DHCP server owns this exchange.
+            let selecting = pkt.options.server_id().is_some();
+            // SELECTING: option 54 names the chosen server. If it is not us,
+            // stay silent — another DHCP server owns this exchange.
             if let Some(sid) = pkt.options.server_id() {
                 if sid != cfg.server_ip {
                     return;
@@ -77,6 +78,17 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
             }
             let requested = pkt.options.requested_ip().unwrap_or(pkt.ciaddr);
             println!("nanodhcp: REQUEST ip={} mac={}", requested, mac);
+
+            // INIT-REBOOT (no option 54): with no record of this client, stay
+            // silent so a server that has one can answer (RFC 2131 §4.3.2).
+            let known = cfg.static_for(mac).is_some() || store.get(&mac).is_some();
+            if !selecting && !known {
+                println!(
+                    "nanodhcp: REQUEST from unknown mac={} (INIT-REBOOT), ignored",
+                    mac
+                );
+                return;
+            }
 
             match allocator::assign_ip(cfg, store, mac, now) {
                 // Honour the request only if the client wants the address we

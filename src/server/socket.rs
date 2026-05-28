@@ -16,7 +16,23 @@ pub fn bind(cfg: &DhcpConfig) -> io::Result<UdpSocket> {
     socket.set_broadcast(true)?;
 
     #[cfg(target_os = "linux")]
-    linux::bind_to_device(&socket, &cfg.interface);
+    if let Err(e) = linux::bind_to_device(&socket, &cfg.interface) {
+        if cfg.allow_unbound {
+            eprintln!(
+                "nanodhcp: warning: cannot bind to interface '{}': {} \
+                 (allow_unbound=true, serving on 0.0.0.0)",
+                cfg.interface, e
+            );
+        } else {
+            // Fail-fast: serving on the wrong interface is dangerous for an
+            // appliance. Opt out explicitly with allow_unbound=true.
+            return Err(io::Error::other(format!(
+                "cannot bind to interface '{}': {} \
+                 (set allow_unbound=true to serve on 0.0.0.0 anyway)",
+                cfg.interface, e
+            )));
+        }
+    }
     #[cfg(not(target_os = "linux"))]
     let _ = cfg; // SO_BINDTODEVICE is Linux-only; ignore the interface elsewhere.
 
@@ -42,36 +58,30 @@ mod linux {
         ) -> i32;
     }
 
-    /// Best-effort SO_BINDTODEVICE. On failure (e.g. missing privileges) we warn
-    /// and continue — a single-NIC host still works bound to 0.0.0.0:67.
-    pub fn bind_to_device(socket: &UdpSocket, ifname: &str) {
-        let cname = match CString::new(ifname) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!(
-                    "nanodhcp: warning: interface name '{}' contains a NUL byte",
-                    ifname
-                );
-                return;
-            }
-        };
-        // SAFETY: `cname` outlives the call and we pass its byte length; the fd
-        // is valid for the lifetime of the borrowed socket.
+    /// Apply SO_BINDTODEVICE. Returns the OS error on failure so the caller can
+    /// decide whether that is fatal (see `allow_unbound`).
+    pub fn bind_to_device(socket: &UdpSocket, ifname: &str) -> std::io::Result<()> {
+        let cname = CString::new(ifname).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface name contains a NUL byte",
+            )
+        })?;
+        // SAFETY: `cname` outlives the call; we pass its length including the
+        // terminating NUL (the conventional form for SO_BINDTODEVICE). The fd is
+        // valid for the lifetime of the borrowed socket.
         let ret = unsafe {
             setsockopt(
                 socket.as_raw_fd(),
                 SOL_SOCKET,
                 SO_BINDTODEVICE,
                 cname.as_ptr() as *const c_void,
-                ifname.len() as u32,
+                cname.as_bytes_with_nul().len() as u32,
             )
         };
         if ret != 0 {
-            eprintln!(
-                "nanodhcp: warning: SO_BINDTODEVICE({}) failed: {}",
-                ifname,
-                std::io::Error::last_os_error()
-            );
+            return Err(std::io::Error::last_os_error());
         }
+        Ok(())
     }
 }

@@ -50,9 +50,41 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         errors.push("lease_time must be greater than 0".to_string());
     }
 
-    // static bindings.
     let network = cfg.subnet.network();
     let broadcast = cfg.subnet.broadcast();
+
+    // Key addresses must not collide with the network or broadcast address.
+    for (ip, label) in [
+        (cfg.server_ip, "server_ip"),
+        (cfg.pool_start, "pool_start"),
+        (cfg.pool_end, "pool_end"),
+    ] {
+        if ip == network || ip == broadcast {
+            errors.push(format!(
+                "{} {} must not be the network or broadcast address",
+                label, ip
+            ));
+        }
+    }
+    if let Some(router) = cfg.router {
+        if router == network || router == broadcast {
+            errors.push(format!(
+                "router {} must not be the network or broadcast address",
+                router
+            ));
+        }
+    }
+
+    // The server's own address inside the pool would silently shrink it.
+    let server = to_u32(cfg.server_ip);
+    if server >= to_u32(cfg.pool_start) && server <= to_u32(cfg.pool_end) {
+        errors.push(format!(
+            "server_ip {} is inside the dynamic pool {}..={}",
+            cfg.server_ip, cfg.pool_start, cfg.pool_end
+        ));
+    }
+
+    // static bindings.
     let mut seen_mac: HashMap<String, &str> = HashMap::new();
     let mut seen_ip: HashMap<u32, &str> = HashMap::new();
     for s in &cfg.statics {
@@ -170,5 +202,21 @@ lease_file=/tmp/leases
         text.push_str("static=a,aa:aa:aa:aa:aa:aa,10.0.0.5\n");
         let cfg = parse_config(&text).unwrap();
         assert!(validate(&cfg).unwrap_err().contains("outside subnet"));
+    }
+
+    #[test]
+    fn server_ip_in_pool_fails() {
+        let text = base().replace("server_ip=192.168.10.1", "server_ip=192.168.10.150");
+        let cfg = parse_config(&text).unwrap();
+        assert!(validate(&cfg)
+            .unwrap_err()
+            .contains("inside the dynamic pool"));
+    }
+
+    #[test]
+    fn pool_endpoint_on_broadcast_fails() {
+        let text = base().replace("pool_end=192.168.10.200", "pool_end=192.168.10.255");
+        let cfg = parse_config(&text).unwrap();
+        assert!(validate(&cfg).unwrap_err().contains("broadcast"));
     }
 }

@@ -30,6 +30,11 @@ pub struct DhcpConfig {
     pub lease_time: u32,
     /// Path to the dynamic lease database.
     pub lease_file: String,
+    /// When binding the socket to `interface` fails, keep serving on `0.0.0.0`
+    /// instead of aborting. Default `false` (fail-fast). Only consulted on
+    /// Linux, where interface binding is attempted.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub allow_unbound: bool,
     pub statics: Vec<StaticLease>,
 }
 
