@@ -17,12 +17,7 @@ use crate::util::mac::MacAddr;
 
 use super::store::LeaseStore;
 
-pub fn assign_ip(
-    cfg: &DhcpConfig,
-    store: &LeaseStore,
-    mac: MacAddr,
-    now: u64,
-) -> Option<Ipv4Addr> {
+pub fn assign_ip(cfg: &DhcpConfig, store: &LeaseStore, mac: MacAddr, now: u64) -> Option<Ipv4Addr> {
     // 1. Static binding always wins.
     if let Some(s) = cfg.static_for(mac) {
         return Some(s.ip);

@@ -68,9 +68,12 @@ impl Options {
     }
 
     pub fn msg_type(&self) -> Option<DhcpMessageType> {
-        self.get(OPT_MSG_TYPE)
-            .and_then(|d| d.first())
-            .and_then(|b| DhcpMessageType::from_u8(*b))
+        // RFC 2132 §9.6: option 53 has length exactly 1.
+        let d = self.get(OPT_MSG_TYPE)?;
+        if d.len() != 1 {
+            return None;
+        }
+        DhcpMessageType::from_u8(d[0])
     }
 
     pub fn requested_ip(&self) -> Option<Ipv4Addr> {
@@ -99,9 +102,11 @@ impl Options {
     }
 }
 
+/// Decode a 4-byte IPv4 option value. RFC 2132 specifies length exactly 4 for
+/// the address options we read (50 Requested IP, 54 Server Identifier).
 fn ipv4(data: Option<&[u8]>) -> Option<Ipv4Addr> {
     let d = data?;
-    if d.len() < 4 {
+    if d.len() != 4 {
         return None;
     }
     Some(Ipv4Addr::new(d[0], d[1], d[2], d[3]))
@@ -165,11 +170,7 @@ mod tests {
     #[test]
     fn parse_basic() {
         // msg type = DISCOVER, requested ip = 1.2.3.4, end
-        let buf = [
-            OPT_MSG_TYPE, 1, 1,
-            OPT_REQUESTED_IP, 4, 1, 2, 3, 4,
-            OPT_END,
-        ];
+        let buf = [OPT_MSG_TYPE, 1, 1, OPT_REQUESTED_IP, 4, 1, 2, 3, 4, OPT_END];
         let opts = Options::parse(&buf);
         assert_eq!(opts.msg_type(), Some(DhcpMessageType::Discover));
         assert_eq!(opts.requested_ip(), Some(Ipv4Addr::new(1, 2, 3, 4)));
@@ -185,8 +186,13 @@ mod tests {
     #[test]
     fn unknown_option_is_ignored_but_parsing_continues() {
         let buf = [
-            200, 2, 0xaa, 0xbb, // unknown option
-            OPT_MSG_TYPE, 1, 5,
+            200,
+            2,
+            0xaa,
+            0xbb, // unknown option
+            OPT_MSG_TYPE,
+            1,
+            5,
             OPT_END,
         ];
         let opts = Options::parse(&buf);
@@ -221,6 +227,22 @@ mod tests {
         let buf = [OPT_REQUESTED_IP, 2, 1, 2, OPT_END];
         let opts = Options::parse(&buf);
         assert_eq!(opts.requested_ip(), None);
+    }
+
+    #[test]
+    fn overlong_ipv4_option_rejected() {
+        // RFC 2132: option 50 has length exactly 4; 5 bytes must be rejected.
+        let buf = [OPT_REQUESTED_IP, 5, 1, 2, 3, 4, 5, OPT_END];
+        let opts = Options::parse(&buf);
+        assert_eq!(opts.requested_ip(), None);
+    }
+
+    #[test]
+    fn msg_type_wrong_length_rejected() {
+        // RFC 2132 §9.6: option 53 has length exactly 1.
+        let buf = [OPT_MSG_TYPE, 2, 1, 2, OPT_END];
+        let opts = Options::parse(&buf);
+        assert_eq!(opts.msg_type(), None);
     }
 
     #[test]

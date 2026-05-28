@@ -54,7 +54,10 @@ fn config_path(rest: &[String]) -> Result<String, String> {
             .get(1)
             .cloned()
             .ok_or_else(|| "option -c requires a path".to_string()),
-        Some(other) => Err(format!("unexpected argument '{}', expected -c <config>", other)),
+        Some(other) => Err(format!(
+            "unexpected argument '{}', expected -c <config>",
+            other
+        )),
         None => Err("missing -c <config>".to_string()),
     }
 }
@@ -101,7 +104,10 @@ fn cmd_leases(path: &str) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    println!("{:<8} {:<17} {:<15} {:<16} {}", "KIND", "MAC", "IP", "NAME/HOST", "EXPIRES");
+    println!(
+        "{:<8} {:<17} {:<15} {:<16} EXPIRES",
+        "KIND", "MAC", "IP", "NAME/HOST"
+    );
     for l in &all {
         let expires = if l.expires_at == 0 {
             "-".to_string()

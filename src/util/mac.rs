@@ -60,7 +60,10 @@ impl FromStr for MacAddr {
             count += 1;
         }
         if count != 6 {
-            return Err(format!("invalid MAC '{}': expected 6 octets, got {}", s, count));
+            return Err(format!(
+                "invalid MAC '{}': expected 6 octets, got {}",
+                s, count
+            ));
         }
         Ok(MacAddr(octets))
     }

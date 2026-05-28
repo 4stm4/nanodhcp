@@ -59,7 +59,10 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         if !cfg.subnet.contains(s.ip) {
             errors.push(format!(
                 "static '{}': IP {} is outside subnet {}/{}",
-                s.name, s.ip, cfg.subnet.network(), cfg.subnet.prefix
+                s.name,
+                s.ip,
+                cfg.subnet.network(),
+                cfg.subnet.prefix
             ));
         }
         if s.ip == network || s.ip == broadcast {
@@ -94,7 +97,10 @@ fn check_in_subnet(cfg: &DhcpConfig, ip: Ipv4Addr, label: &str, errors: &mut Vec
     if !cfg.subnet.contains(ip) {
         errors.push(format!(
             "{} {} is outside subnet {}/{}",
-            label, ip, cfg.subnet.network(), cfg.subnet.prefix
+            label,
+            ip,
+            cfg.subnet.network(),
+            cfg.subnet.prefix
         ));
     }
 }

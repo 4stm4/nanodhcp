@@ -85,10 +85,7 @@ pub fn parse_config(text: &str) -> Result<DhcpConfig, String> {
 fn parse_static(value: &str) -> Result<StaticLease, String> {
     let parts: Vec<&str> = value.split(',').map(|p| p.trim()).collect();
     if parts.len() != 3 {
-        return Err(format!(
-            "static must be 'name,mac,ip', got '{}'",
-            value
-        ));
+        return Err(format!("static must be 'name,mac,ip', got '{}'", value));
     }
     let mac = parts[1].parse::<MacAddr>()?;
     let ip = ip::parse_ipv4(parts[2])?;
@@ -135,12 +132,18 @@ static=printer,11:22:33:44:55:66,192.168.10.11
         assert_eq!(cfg.interface, "eth0");
         assert_eq!(cfg.server_ip, "192.168.10.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(cfg.subnet.prefix, 24);
-        assert_eq!(cfg.pool_start, "192.168.10.100".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            cfg.pool_start,
+            "192.168.10.100".parse::<Ipv4Addr>().unwrap()
+        );
         assert_eq!(cfg.dns.len(), 2);
         assert_eq!(cfg.lease_time, 86400);
         assert_eq!(cfg.statics.len(), 2);
         assert_eq!(cfg.statics[0].name, "nas");
-        assert_eq!(cfg.router, Some("192.168.10.1".parse::<Ipv4Addr>().unwrap()));
+        assert_eq!(
+            cfg.router,
+            Some("192.168.10.1".parse::<Ipv4Addr>().unwrap())
+        );
     }
 
     #[test]
