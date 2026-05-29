@@ -20,6 +20,10 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
     println!("nanodhcp: listening on {} udp/67", cfg.interface);
 
     let mut store = LeaseStore::load(&cfg.lease_file);
+    let purged = store.purge_expired(time::now());
+    if purged > 0 {
+        println!("nanodhcp: purged {} expired lease(s) at startup", purged);
+    }
     let mut buf = [0u8; 1500];
 
     loop {
@@ -95,6 +99,7 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
                 // would give it (or expressed no preference).
                 Some(ip) if requested.is_unspecified() || requested == ip => {
                     if cfg.static_for(mac).is_none() {
+                        store.purge_expired(now);
                         store.insert(Lease {
                             mac,
                             ip,

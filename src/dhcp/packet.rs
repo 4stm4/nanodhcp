@@ -22,17 +22,13 @@ pub const COOKIE_OFFSET: usize = 236;
 pub const MIN_LEN: usize = 240;
 
 /// The fields of a client request we use. `op`/`htype`/`hlen` are validated
-/// during parsing but not stored (they are constant for a valid request).
+/// during parsing but not stored (they are constant for a valid request);
+/// `yiaddr`/`siaddr` are server-set fields a client request leaves zero.
 #[derive(Debug)]
 pub struct DhcpPacket {
     pub xid: u32,
     pub flags: u16,
     pub ciaddr: Ipv4Addr,
-    /// Parsed for completeness; a client request normally leaves these zero.
-    #[allow(dead_code)]
-    pub yiaddr: Ipv4Addr,
-    #[allow(dead_code)]
-    pub siaddr: Ipv4Addr,
     pub giaddr: Ipv4Addr,
     pub chaddr: MacAddr,
     pub options: Options,
@@ -62,8 +58,6 @@ impl DhcpPacket {
         let xid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
         let flags = u16::from_be_bytes([buf[10], buf[11]]);
         let ciaddr = read_ipv4(buf, 12);
-        let yiaddr = read_ipv4(buf, 16);
-        let siaddr = read_ipv4(buf, 20);
         let giaddr = read_ipv4(buf, 24);
         // chaddr is 16 bytes at offset 28; for Ethernet only the first 6 matter.
         let chaddr = MacAddr::from_bytes(&buf[28..34]).ok_or("invalid chaddr")?;
@@ -73,8 +67,6 @@ impl DhcpPacket {
             xid,
             flags,
             ciaddr,
-            yiaddr,
-            siaddr,
             giaddr,
             chaddr,
             options,

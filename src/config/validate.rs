@@ -20,7 +20,19 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         errors.push("interface must not be empty".to_string());
     }
 
-    // subnet_mask must agree with the CIDR prefix.
+    if cfg.lease_file.is_empty() {
+        errors.push("lease_file must not be empty".to_string());
+    }
+
+    // Option 6 packs 4 bytes per server into a single TLV whose length is one
+    // byte, so more than 63 servers would silently truncate on the wire.
+    if cfg.dns.len() > 63 {
+        errors.push(format!(
+            "too many dns servers ({}): at most 63 fit in one DHCP option",
+            cfg.dns.len()
+        ));
+    }
+
     if cfg.subnet.netmask() != cfg.subnet_mask {
         errors.push(format!(
             "subnet_mask {} does not match subnet prefix /{} (expected {})",
@@ -30,7 +42,6 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         ));
     }
 
-    // server / router / pool must live in the subnet.
     check_in_subnet(cfg, cfg.server_ip, "server_ip", &mut errors);
     check_in_subnet(cfg, cfg.pool_start, "pool_start", &mut errors);
     check_in_subnet(cfg, cfg.pool_end, "pool_end", &mut errors);
@@ -38,7 +49,6 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         check_in_subnet(cfg, router, "router", &mut errors);
     }
 
-    // pool ordering.
     if to_u32(cfg.pool_start) > to_u32(cfg.pool_end) {
         errors.push(format!(
             "pool_start {} is greater than pool_end {}",
@@ -84,7 +94,6 @@ pub fn validate(cfg: &DhcpConfig) -> Result<(), String> {
         ));
     }
 
-    // static bindings.
     let mut seen_mac: HashMap<String, &str> = HashMap::new();
     let mut seen_ip: HashMap<u32, &str> = HashMap::new();
     for s in &cfg.statics {
@@ -211,6 +220,13 @@ lease_file=/tmp/leases
         assert!(validate(&cfg)
             .unwrap_err()
             .contains("inside the dynamic pool"));
+    }
+
+    #[test]
+    fn too_many_dns_servers_fails() {
+        let mut cfg = parse_config(&base()).unwrap();
+        cfg.dns = vec!["1.1.1.1".parse().unwrap(); 64];
+        assert!(validate(&cfg).unwrap_err().contains("too many dns"));
     }
 
     #[test]

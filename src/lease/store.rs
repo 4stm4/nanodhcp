@@ -67,6 +67,16 @@ impl LeaseStore {
         self.by_mac.remove(mac)
     }
 
+    /// Drop dynamic leases that expired at or before `now`, returning how many
+    /// were removed. Leases are keyed by MAC, so without this the store (and the
+    /// lease file) would grow without bound as distinct clients come and go — an
+    /// expired entry is otherwise never reclaimed.
+    pub fn purge_expired(&mut self, now: u64) -> usize {
+        let before = self.by_mac.len();
+        self.by_mac.retain(|_, l| l.expires_at > now);
+        before - self.by_mac.len()
+    }
+
     /// All dynamic leases, sorted by IP for stable output.
     pub fn sorted(&self) -> Vec<&Lease> {
         let mut leases: Vec<&Lease> = self.by_mac.values().collect();
@@ -158,6 +168,22 @@ mod tests {
     #[test]
     fn missing_file_is_empty() {
         let store = LeaseStore::load("/nonexistent/nanodhcp/leases-test");
+        assert_eq!(store.iter().count(), 0);
+    }
+
+    #[test]
+    fn purge_expired_drops_only_stale() {
+        let mut store = LeaseStore::load("/nonexistent/nanodhcp/purge-test");
+        let stale: MacAddr = "aa:aa:aa:aa:aa:aa".parse().unwrap();
+        let live: MacAddr = "bb:bb:bb:bb:bb:bb".parse().unwrap();
+        store.insert(parse_line("aa:aa:aa:aa:aa:aa 192.168.10.10 - 100").unwrap());
+        store.insert(parse_line("bb:bb:bb:bb:bb:bb 192.168.10.11 - 5000").unwrap());
+
+        assert_eq!(store.purge_expired(1000), 1);
+        assert!(store.get(&stale).is_none());
+        assert!(store.get(&live).is_some());
+        // An entry exactly at `now` is treated as expired.
+        assert_eq!(store.purge_expired(5000), 1);
         assert_eq!(store.iter().count(), 0);
     }
 }
