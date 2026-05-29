@@ -149,4 +149,86 @@ mod tests {
         let pkt = DhcpPacket::parse(&p).unwrap();
         assert_eq!(pkt.options.msg_type(), None);
     }
+
+    // ---- Randomized parser fuzzing (std-only, deterministic) ----
+
+    /// SplitMix64: a tiny deterministic PRNG so the fuzz tests are reproducible
+    /// and need no external crate.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn byte(&mut self) -> u8 {
+            self.next_u64() as u8
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// Touch every accessor on a parsed packet. Under fuzzing the only contract
+    /// is that none of these panic or read out of bounds.
+    fn exercise(pkt: &DhcpPacket) {
+        let _ = pkt.options.msg_type();
+        let _ = pkt.options.requested_ip();
+        let _ = pkt.options.server_id();
+        let _ = pkt.options.param_request_list();
+        let _ = pkt.options.hostname();
+        let _ = pkt.xid;
+        let _ = pkt.flags;
+        let _ = pkt.ciaddr;
+        let _ = pkt.giaddr;
+        let _ = &pkt.chaddr;
+    }
+
+    #[test]
+    fn fuzz_random_bytes_never_panic() {
+        // Arbitrary buffers of arbitrary length must parse to Ok or Err, never
+        // panic. Most are rejected by the header checks; any survivor exercises
+        // the option parser with whatever bytes followed the cookie.
+        let mut rng = Rng(0x1234_5678_9ABC_DEF0);
+        for _ in 0..50_000 {
+            let n = rng.below(400);
+            let mut buf = vec![0u8; n];
+            for b in &mut buf {
+                *b = rng.byte();
+            }
+            if let Ok(pkt) = DhcpPacket::parse(&buf) {
+                exercise(&pkt);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_option_area_never_panics() {
+        // Pin a valid BOOTP header + cookie and fuzz only the options area so
+        // every iteration drives the TLV parser with adversarial length bytes.
+        // A valid header always parses, so malformed options must be dropped,
+        // never rejected and never over-read.
+        let mut rng = Rng(0x0FED_CBA9_8765_4321);
+        for _ in 0..50_000 {
+            let mut buf = vec![0u8; MIN_LEN];
+            buf[0] = BOOTREQUEST;
+            buf[1] = HTYPE_ETHERNET;
+            buf[2] = HLEN_ETHERNET;
+            for b in &mut buf[28..34] {
+                *b = rng.byte();
+            }
+            buf[COOKIE_OFFSET..MIN_LEN].copy_from_slice(&MAGIC_COOKIE);
+            let opt_len = rng.below(320);
+            for _ in 0..opt_len {
+                buf.push(rng.byte());
+            }
+            let pkt = DhcpPacket::parse(&buf).expect("valid header must always parse");
+            exercise(&pkt);
+        }
+    }
 }

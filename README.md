@@ -66,6 +66,27 @@ Simple line-based `key=value`. See [`examples/nanodhcp.conf`](examples/nanodhcp.
 
 Comments start with `#`; blank lines are ignored; unknown keys are an error.
 
+## Install (systemd)
+
+Install the binary, a config, and the bundled unit, then enable it:
+
+```sh
+sudo install -m 0755 target/release/nanodhcp /usr/local/bin/nanodhcp
+sudo install -d /etc/nanodhcp
+sudo install -m 0644 examples/nanodhcp.conf /etc/nanodhcp/nanodhcp.conf
+sudo install -m 0644 packaging/nanodhcp.service /etc/systemd/system/nanodhcp.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nanodhcp
+journalctl -u nanodhcp -f
+```
+
+The unit runs nanodhcp as a sandboxed dynamic user holding only
+`CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and keeps leases under
+`/var/lib/nanodhcp` (set `lease_file=/var/lib/nanodhcp/leases` in the config to
+match). It stops cleanly on `SIGTERM`. See
+[`packaging/nanodhcp.service`](packaging/nanodhcp.service).
+
 ## How it works
 
 `DISCOVER -> OFFER`, then `REQUEST -> ACK`. A request for an address we cannot
