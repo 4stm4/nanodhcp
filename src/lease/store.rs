@@ -41,8 +41,8 @@ impl LeaseStore {
                         Some(lease) => {
                             by_mac.insert(lease.mac, lease);
                         }
-                        None => eprintln!(
-                            "nanodhcp: warning: ignoring malformed lease at line {}: '{}'",
+                        None => crate::log_warn!(
+                            "ignoring malformed lease at line {}: '{}'",
                             idx + 1,
                             line
                         ),
@@ -50,10 +50,7 @@ impl LeaseStore {
                 }
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => eprintln!(
-                "nanodhcp: warning: cannot read lease file '{}': {}",
-                path, e
-            ),
+            Err(e) => crate::log_warn!("cannot read lease file '{}': {}", path, e),
         }
         LeaseStore {
             path: PathBuf::from(path),

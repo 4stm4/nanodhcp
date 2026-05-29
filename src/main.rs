@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 use crate::lease::model::{Lease, LeaseKind};
 use crate::lease::LeaseStore;
+use crate::util::log;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,12 +40,55 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
             print_help();
             Ok(ExitCode::SUCCESS)
         }
-        "run" => cmd_run(&config_path(&args[1..])?),
+        "run" => cmd_run(parse_run_args(&args[1..])?),
         "check" => cmd_check(&config_path(&args[1..])?),
         "leases" => cmd_leases(&config_path(&args[1..])?),
         // A bare argument is treated as a config path: `nanodhcp <config>`.
-        path => cmd_run(path),
+        path => cmd_run(RunArgs {
+            path: path.to_string(),
+            level: log::Level::Info,
+        }),
     }
+}
+
+struct RunArgs {
+    path: String,
+    level: log::Level,
+}
+
+/// Parse `run` arguments: `-c <config>` plus an optional verbosity flag.
+fn parse_run_args(rest: &[String]) -> Result<RunArgs, String> {
+    let mut path: Option<String> = None;
+    let mut level = log::Level::Info;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-c" | "--config" => {
+                path = Some(
+                    rest.get(i + 1)
+                        .cloned()
+                        .ok_or_else(|| "option -c requires a path".to_string())?,
+                );
+                i += 2;
+            }
+            "-q" | "--quiet" => {
+                level = log::Level::Warn;
+                i += 1;
+            }
+            "-v" | "--verbose" => {
+                level = log::Level::Debug;
+                i += 1;
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument '{}', expected -c <config>",
+                    other
+                ));
+            }
+        }
+    }
+    let path = path.ok_or_else(|| "missing -c <config>".to_string())?;
+    Ok(RunArgs { path, level })
 }
 
 /// Extract the value of `-c`/`--config` from the remaining arguments.
@@ -62,9 +106,15 @@ fn config_path(rest: &[String]) -> Result<String, String> {
     }
 }
 
-fn cmd_run(path: &str) -> Result<ExitCode, String> {
-    let cfg = config::load(path)?;
-    server::daemon::run(cfg).map_err(|e| format!("fatal: {}", e))?;
+fn cmd_run(args: RunArgs) -> Result<ExitCode, String> {
+    log::set_level(args.level);
+    let cfg = config::load(&args.path)?;
+    // The daemon is running and using the logger by now, so report a fatal
+    // socket error through it rather than as a plain usage-style message.
+    if let Err(e) = server::daemon::run(cfg) {
+        crate::log_error!("fatal: {}", e);
+        return Ok(ExitCode::FAILURE);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -136,7 +186,11 @@ USAGE:
     nanodhcp leases -c <config>   print static and dynamic leases
     nanodhcp help                 show this help
 
-    nanodhcp <config>             alias for 'run -c <config>'",
+    nanodhcp <config>             alias for 'run -c <config>'
+
+OPTIONS (run):
+    -q, --quiet                   log warnings and errors only
+    -v, --verbose                 also log per-packet debug detail",
         env!("CARGO_PKG_VERSION")
     );
 }

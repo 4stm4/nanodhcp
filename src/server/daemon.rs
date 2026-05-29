@@ -13,6 +13,7 @@ use crate::lease::allocator;
 use crate::lease::model::{Lease, LeaseKind};
 use crate::lease::LeaseStore;
 use crate::util::time;
+use crate::{log_debug, log_info, log_warn};
 
 use super::socket::{self, CLIENT_PORT};
 
@@ -39,12 +40,12 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
     // act on SIGTERM/SIGINT and run the periodic purge between datagrams.
     sock.set_read_timeout(Some(POLL_INTERVAL))?;
     install_signal_handlers();
-    println!("nanodhcp: listening on {} udp/67", cfg.interface);
+    log_info!("listening on {} udp/67", cfg.interface);
 
     let mut store = LeaseStore::load(&cfg.lease_file);
     let purged = store.purge_expired(time::now());
     if purged > 0 {
-        println!("nanodhcp: purged {} expired lease(s) at startup", purged);
+        log_info!("purged {} expired lease(s) at startup", purged);
     }
     let mut next_purge = time::now() + PURGE_INTERVAL_SECS;
     let mut buf = [0u8; 1500];
@@ -59,23 +60,23 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
                     e.kind(),
                     ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
                 ) => {}
-            Err(e) => eprintln!("nanodhcp: recv error: {}", e),
+            Err(e) => log_warn!("recv error: {}", e),
         }
 
         let now = time::now();
         if now >= next_purge {
             let removed = store.purge_expired(now);
             if removed > 0 {
-                println!("nanodhcp: purged {} expired lease(s)", removed);
+                log_info!("purged {} expired lease(s)", removed);
                 if let Err(e) = store.save() {
-                    eprintln!("nanodhcp: warning: cannot save leases: {}", e);
+                    log_warn!("cannot save leases: {}", e);
                 }
             }
             next_purge = now + PURGE_INTERVAL_SECS;
         }
     }
 
-    println!("nanodhcp: received shutdown signal, exiting");
+    log_info!("received shutdown signal, exiting");
     Ok(())
 }
 
@@ -112,7 +113,7 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
     let pkt = match DhcpPacket::parse(data) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("nanodhcp: ignored malformed packet: {}", e);
+            log_debug!("ignored malformed packet: {}", e);
             return;
         }
     };
@@ -120,7 +121,7 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
     let decision = decide(cfg, store, &pkt, time::now());
     if decision.persist {
         if let Err(e) = store.save() {
-            eprintln!("nanodhcp: warning: cannot save leases: {}", e);
+            log_warn!("cannot save leases: {}", e);
         }
     }
     if let Some((data, dst)) = decision.reply {
@@ -167,7 +168,7 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
     let mtype = match pkt.options.msg_type() {
         Some(m) => m,
         None => {
-            eprintln!("nanodhcp: ignored packet without DHCP message type");
+            log_debug!("ignored packet without DHCP message type");
             return Decision::silent();
         }
     };
@@ -178,14 +179,14 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
 
     match mtype {
         DhcpMessageType::Discover => {
-            println!("nanodhcp: DISCOVER mac={} hostname={}", mac, host_disp);
+            log_info!("DISCOVER mac={} hostname={}", mac, host_disp);
             match allocator::assign_ip(cfg, store, mac, now) {
                 Some(ip) => {
-                    println!("nanodhcp: OFFER ip={} mac={}", ip, mac);
+                    log_info!("OFFER ip={} mac={}", ip, mac);
                     Decision::reply(builder::build_offer(pkt, cfg, ip), ReplyDst::Broadcast)
                 }
                 None => {
-                    eprintln!("nanodhcp: no free address available for mac={}", mac);
+                    log_warn!("no free address available for mac={}", mac);
                     Decision::silent()
                 }
             }
@@ -201,16 +202,13 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
                 }
             }
             let requested = pkt.options.requested_ip().unwrap_or(pkt.ciaddr);
-            println!("nanodhcp: REQUEST ip={} mac={}", requested, mac);
+            log_info!("REQUEST ip={} mac={}", requested, mac);
 
             // INIT-REBOOT (no option 54): with no record of this client, stay
             // silent so a server that has one can answer (RFC 2131 §4.3.2).
             let known = cfg.static_for(mac).is_some() || store.get(&mac).is_some();
             if !selecting && !known {
-                println!(
-                    "nanodhcp: REQUEST from unknown mac={} (INIT-REBOOT), ignored",
-                    mac
-                );
+                log_debug!("REQUEST from unknown mac={} (INIT-REBOOT), ignored", mac);
                 return Decision::silent();
             }
 
@@ -230,14 +228,14 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
                         });
                         persist = true;
                     }
-                    println!("nanodhcp: ACK ip={} mac={}", ip, mac);
+                    log_info!("ACK ip={} mac={}", ip, mac);
                     Decision {
                         reply: Some((builder::build_ack(pkt, cfg, ip), ack_dst(pkt))),
                         persist,
                     }
                 }
                 _ => {
-                    println!("nanodhcp: NAK mac={} requested={}", mac, requested);
+                    log_info!("NAK mac={} requested={}", mac, requested);
                     // A NAK is always broadcast: the client's notion of its own
                     // address is wrong, so it may be unreachable by unicast.
                     Decision::reply(builder::build_nak(pkt, cfg), ReplyDst::Broadcast)
@@ -247,7 +245,7 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
 
         DhcpMessageType::Release => {
             let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
-            println!("nanodhcp: RELEASE mac={}", mac);
+            log_info!("RELEASE mac={}", mac);
             Decision {
                 reply: None,
                 persist,
@@ -267,7 +265,7 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
             if !declined.is_unspecified() {
                 store.quarantine(declined, now + DECLINE_QUARANTINE_SECS);
             }
-            println!("nanodhcp: DECLINE mac={} ip={}", mac, declined);
+            log_info!("DECLINE mac={} ip={}", mac, declined);
             Decision {
                 reply: None,
                 persist,
@@ -278,12 +276,12 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
             // RFC 2131 §4.3.5: the client already has an address and only wants
             // configuration parameters. Reply with a DHCPACK carrying options
             // but no yiaddr and no lease time, unicast to its ciaddr.
-            println!("nanodhcp: INFORM mac={} ciaddr={}", mac, pkt.ciaddr);
+            log_info!("INFORM mac={} ciaddr={}", mac, pkt.ciaddr);
             Decision::reply(builder::build_inform_ack(pkt, cfg), ack_dst(pkt))
         }
 
         other => {
-            eprintln!("nanodhcp: ignoring unsupported message type {:?}", other);
+            log_debug!("ignoring unsupported message type {:?}", other);
             Decision::silent()
         }
     }
@@ -307,7 +305,7 @@ fn send(sock: &UdpSocket, data: &[u8], dst: ReplyDst) {
         ReplyDst::Unicast(ip) => SocketAddrV4::new(ip, CLIENT_PORT),
     };
     if let Err(e) = sock.send_to(data, addr) {
-        eprintln!("nanodhcp: send error: {}", e);
+        log_warn!("send error: {}", e);
     }
 }
 

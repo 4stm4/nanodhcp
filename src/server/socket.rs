@@ -18,10 +18,10 @@ pub fn bind(cfg: &DhcpConfig) -> io::Result<UdpSocket> {
     #[cfg(target_os = "linux")]
     if let Err(e) = linux::bind_to_device(&socket, &cfg.interface) {
         if cfg.allow_unbound {
-            eprintln!(
-                "nanodhcp: warning: cannot bind to interface '{}': {} \
-                 (allow_unbound=true, serving on 0.0.0.0)",
-                cfg.interface, e
+            crate::log_warn!(
+                "cannot bind to interface '{}': {} (allow_unbound=true, serving on 0.0.0.0)",
+                cfg.interface,
+                e
             );
         } else {
             // Fail-fast: serving on the wrong interface is dangerous for an
