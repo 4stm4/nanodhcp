@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Minimal DHCPv4 server for homelab / embedded Linux / appliance OS"
-repository = ""
+repository = "https://github.com/4stm4/nanodhcp"
 readme = "README.md"
 
 [[bin]]

@@ -1,5 +1,11 @@
 # nanodhcp
 
+[![CI](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml/badge.svg)](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/4stm4/nanodhcp/branch/main/graph/badge.svg)](https://codecov.io/gh/4stm4/nanodhcp)
+[![version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![dependencies](https://img.shields.io/badge/dependencies-std_only-success.svg)](Cargo.toml)
+
 A minimal DHCPv4 server in Rust for a single LAN — homelab, embedded Linux, or
 an appliance OS. It hands out IPv4 addresses from a pool, remembers leases per
 MAC, and supports fixed `MAC -> IP` bindings. That is the whole job.
