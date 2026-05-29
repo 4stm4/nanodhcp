@@ -46,28 +46,78 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
             return;
         }
     };
+
+    let decision = decide(cfg, store, &pkt, time::now());
+    if decision.persist {
+        if let Err(e) = store.save() {
+            eprintln!("nanodhcp: warning: cannot save leases: {}", e);
+        }
+    }
+    if let Some((data, dst)) = decision.reply {
+        send(sock, &data, dst);
+    }
+}
+
+/// Where a reply is sent. We serve one directly-attached LAN, so a client that
+/// already holds an address (renewing, non-zero `ciaddr`) can be answered by
+/// unicast, while one still acquiring an address is answered by broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyDst {
+    Broadcast,
+    Unicast(Ipv4Addr),
+}
+
+/// Outcome of processing one packet: an optional reply (bytes + destination)
+/// and whether the in-memory lease store changed and must be written to disk.
+struct Decision {
+    reply: Option<(Vec<u8>, ReplyDst)>,
+    persist: bool,
+}
+
+impl Decision {
+    fn silent() -> Decision {
+        Decision {
+            reply: None,
+            persist: false,
+        }
+    }
+
+    fn reply(data: Vec<u8>, dst: ReplyDst) -> Decision {
+        Decision {
+            reply: Some((data, dst)),
+            persist: false,
+        }
+    }
+}
+
+/// Decide how to answer one parsed packet, applying any lease change to `store`
+/// in memory. Performs no socket or disk I/O, so the whole protocol state
+/// machine is unit-testable; the caller persists and sends.
+fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) -> Decision {
     let mtype = match pkt.options.msg_type() {
         Some(m) => m,
         None => {
             eprintln!("nanodhcp: ignored packet without DHCP message type");
-            return;
+            return Decision::silent();
         }
     };
 
     let mac = pkt.chaddr;
     let hostname = pkt.options.hostname();
     let host_disp = hostname.as_deref().unwrap_or("-");
-    let now = time::now();
 
     match mtype {
         DhcpMessageType::Discover => {
             println!("nanodhcp: DISCOVER mac={} hostname={}", mac, host_disp);
             match allocator::assign_ip(cfg, store, mac, now) {
                 Some(ip) => {
-                    send(sock, &builder::build_offer(&pkt, cfg, ip));
                     println!("nanodhcp: OFFER ip={} mac={}", ip, mac);
+                    Decision::reply(builder::build_offer(pkt, cfg, ip), ReplyDst::Broadcast)
                 }
-                None => eprintln!("nanodhcp: no free address available for mac={}", mac),
+                None => {
+                    eprintln!("nanodhcp: no free address available for mac={}", mac);
+                    Decision::silent()
+                }
             }
         }
 
@@ -77,7 +127,7 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
             // stay silent — another DHCP server owns this exchange.
             if let Some(sid) = pkt.options.server_id() {
                 if sid != cfg.server_ip {
-                    return;
+                    return Decision::silent();
                 }
             }
             let requested = pkt.options.requested_ip().unwrap_or(pkt.ciaddr);
@@ -91,13 +141,14 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
                     "nanodhcp: REQUEST from unknown mac={} (INIT-REBOOT), ignored",
                     mac
                 );
-                return;
+                return Decision::silent();
             }
 
             match allocator::assign_ip(cfg, store, mac, now) {
                 // Honour the request only if the client wants the address we
                 // would give it (or expressed no preference).
                 Some(ip) if requested.is_unspecified() || requested == ip => {
+                    let mut persist = false;
                     if cfg.static_for(mac).is_none() {
                         store.purge_expired(now);
                         store.insert(Lease {
@@ -107,48 +158,417 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
                             expires_at: now + cfg.lease_time as u64,
                             kind: LeaseKind::Dynamic,
                         });
-                        if let Err(e) = store.save() {
-                            eprintln!("nanodhcp: warning: cannot save leases: {}", e);
-                        }
+                        persist = true;
                     }
-                    send(sock, &builder::build_ack(&pkt, cfg, ip));
                     println!("nanodhcp: ACK ip={} mac={}", ip, mac);
+                    Decision {
+                        reply: Some((builder::build_ack(pkt, cfg, ip), ack_dst(pkt))),
+                        persist,
+                    }
                 }
                 _ => {
-                    send(sock, &builder::build_nak(&pkt, cfg));
                     println!("nanodhcp: NAK mac={} requested={}", mac, requested);
+                    // A NAK is always broadcast: the client's notion of its own
+                    // address is wrong, so it may be unreachable by unicast.
+                    Decision::reply(builder::build_nak(pkt, cfg), ReplyDst::Broadcast)
                 }
             }
         }
 
         DhcpMessageType::Release => {
-            if cfg.static_for(mac).is_none() && store.remove(&mac).is_some() {
-                if let Err(e) = store.save() {
-                    eprintln!("nanodhcp: warning: cannot save leases: {}", e);
-                }
-            }
+            let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
             println!("nanodhcp: RELEASE mac={}", mac);
+            Decision {
+                reply: None,
+                persist,
+            }
         }
 
         DhcpMessageType::Decline => {
-            // The client says the address is already in use. Drop our record so
-            // we stop offering it; full conflict tracking is out of scope.
-            if cfg.static_for(mac).is_none() && store.remove(&mac).is_some() {
-                let _ = store.save();
-            }
+            // The client says the address is already in use, so drop our record
+            // and stop offering it.
+            let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
             println!("nanodhcp: DECLINE mac={}", mac);
+            Decision {
+                reply: None,
+                persist,
+            }
         }
 
-        other => eprintln!("nanodhcp: ignoring unsupported message type {:?}", other),
+        other => {
+            eprintln!("nanodhcp: ignoring unsupported message type {:?}", other);
+            Decision::silent()
+        }
     }
 }
 
-/// Replies always go to the limited broadcast address on the client port.
-/// `nanodhcp` serves a single directly-attached LAN (no relay), so the client
-/// — which has no IP yet — receives the answer as a broadcast.
-fn send(sock: &UdpSocket, data: &[u8]) {
-    let dst = SocketAddrV4::new(Ipv4Addr::BROADCAST, CLIENT_PORT);
-    if let Err(e) = sock.send_to(data, dst) {
+/// Destination for an ACK. A renewing client (non-zero `ciaddr`) can receive
+/// unicast; one still acquiring an address (`ciaddr` zero, from SELECTING or
+/// INIT-REBOOT) is answered by broadcast, which it hears before ARP is set up.
+fn ack_dst(pkt: &DhcpPacket) -> ReplyDst {
+    if pkt.ciaddr.is_unspecified() {
+        ReplyDst::Broadcast
+    } else {
+        ReplyDst::Unicast(pkt.ciaddr)
+    }
+}
+
+/// Send a reply on the client port, by broadcast or unicast as chosen above.
+fn send(sock: &UdpSocket, data: &[u8], dst: ReplyDst) {
+    let addr = match dst {
+        ReplyDst::Broadcast => SocketAddrV4::new(Ipv4Addr::BROADCAST, CLIENT_PORT),
+        ReplyDst::Unicast(ip) => SocketAddrV4::new(ip, CLIENT_PORT),
+    };
+    if let Err(e) = sock.send_to(data, addr) {
         eprintln!("nanodhcp: send error: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::parser::parse_config;
+    use crate::dhcp::options::{
+        Options, OptionsWriter, OPT_MSG_TYPE, OPT_REQUESTED_IP, OPT_SERVER_ID,
+    };
+    use crate::dhcp::packet::{
+        BOOTREQUEST, COOKIE_OFFSET, HLEN_ETHERNET, HTYPE_ETHERNET, MAGIC_COOKIE, MIN_LEN,
+    };
+    use crate::util::mac::MacAddr;
+
+    fn cfg(extra: &str) -> DhcpConfig {
+        let mut text = String::from(
+            "\
+interface=eth0
+server_ip=192.168.10.1
+subnet=192.168.10.0/24
+subnet_mask=255.255.255.0
+pool_start=192.168.10.100
+pool_end=192.168.10.102
+router=192.168.10.1
+lease_time=3600
+lease_file=/tmp/nanodhcp-daemon-test
+",
+        );
+        text.push_str(extra);
+        parse_config(&text).unwrap()
+    }
+
+    /// Always-empty store backed by a path that never exists; `decide` does no
+    /// disk I/O, so this only holds the in-memory map under test.
+    fn store() -> LeaseStore {
+        LeaseStore::load("/nonexistent/nanodhcp/daemon-test")
+    }
+
+    fn ip(s: &str) -> Ipv4Addr {
+        s.parse().unwrap()
+    }
+
+    fn mac_bytes(s: &str) -> [u8; 6] {
+        let m: MacAddr = s.parse().unwrap();
+        let b = m.as_bytes();
+        [b[0], b[1], b[2], b[3], b[4], b[5]]
+    }
+
+    fn lease(mac: &str, addr: &str, expires: u64) -> Lease {
+        Lease {
+            mac: mac.parse().unwrap(),
+            ip: ip(addr),
+            hostname: None,
+            expires_at: expires,
+            kind: LeaseKind::Dynamic,
+        }
+    }
+
+    /// Build a BOOTREQUEST carrying `mtype`, `ciaddr` and the given options.
+    fn packet(
+        mtype: DhcpMessageType,
+        mac: &str,
+        ciaddr: Ipv4Addr,
+        opts: &[(u8, Vec<u8>)],
+    ) -> DhcpPacket {
+        let mut p = vec![0u8; MIN_LEN];
+        p[0] = BOOTREQUEST;
+        p[1] = HTYPE_ETHERNET;
+        p[2] = HLEN_ETHERNET;
+        p[4..8].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        p[12..16].copy_from_slice(&ciaddr.octets());
+        p[28..34].copy_from_slice(&mac_bytes(mac));
+        p[COOKIE_OFFSET..MIN_LEN].copy_from_slice(&MAGIC_COOKIE);
+
+        let mut w = OptionsWriter::new();
+        w.push_u8(OPT_MSG_TYPE, mtype.to_u8());
+        for (code, data) in opts {
+            w.push(*code, data);
+        }
+        p.extend_from_slice(&w.finish());
+        DhcpPacket::parse(&p).unwrap()
+    }
+
+    /// (message type, yiaddr) of a reply produced by `decide`.
+    fn reply_summary(data: &[u8]) -> (DhcpMessageType, Ipv4Addr) {
+        let yiaddr = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+        let mt = Options::parse(&data[MIN_LEN..]).msg_type().unwrap();
+        (mt, yiaddr)
+    }
+
+    fn server_id() -> (u8, Vec<u8>) {
+        (OPT_SERVER_ID, ip("192.168.10.1").octets().to_vec())
+    }
+
+    fn requested(addr: &str) -> (u8, Vec<u8>) {
+        (OPT_REQUESTED_IP, ip(addr).octets().to_vec())
+    }
+
+    #[test]
+    fn discover_offers_first_free_by_broadcast() {
+        let c = cfg("");
+        let mut s = store();
+        let pkt = packet(
+            DhcpMessageType::Discover,
+            "aa:aa:aa:aa:aa:aa",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("offer");
+        assert_eq!(dst, ReplyDst::Broadcast);
+        assert_eq!(
+            reply_summary(&data),
+            (DhcpMessageType::Offer, ip("192.168.10.100"))
+        );
+        assert!(!d.persist);
+        // An OFFER reserves nothing.
+        assert!(s.get(&"aa:aa:aa:aa:aa:aa".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn selecting_our_server_acks_and_persists() {
+        let c = cfg("");
+        let mut s = store();
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[server_id()],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("ack");
+        assert_eq!(dst, ReplyDst::Broadcast); // ciaddr zero in SELECTING
+        assert_eq!(reply_summary(&data).0, DhcpMessageType::Ack);
+        assert!(d.persist);
+        let stored = s.get(&"bb:bb:bb:bb:bb:bb".parse().unwrap()).unwrap();
+        assert_eq!(stored.ip, ip("192.168.10.100"));
+        assert_eq!(stored.expires_at, 1000 + 3600);
+    }
+
+    #[test]
+    fn selecting_other_server_is_silent() {
+        let c = cfg("");
+        let mut s = store();
+        let other = (OPT_SERVER_ID, ip("192.168.10.250").octets().to_vec());
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[other],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+        assert_eq!(s.iter().count(), 0);
+    }
+
+    #[test]
+    fn init_reboot_unknown_is_silent() {
+        let c = cfg("");
+        let mut s = store();
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "cc:cc:cc:cc:cc:cc",
+            Ipv4Addr::UNSPECIFIED,
+            &[requested("192.168.10.100")],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn init_reboot_known_acks() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("cc:cc:cc:cc:cc:cc", "192.168.10.101", 9999));
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "cc:cc:cc:cc:cc:cc",
+            Ipv4Addr::UNSPECIFIED,
+            &[requested("192.168.10.101")],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("ack");
+        assert_eq!(dst, ReplyDst::Broadcast);
+        assert_eq!(
+            reply_summary(&data),
+            (DhcpMessageType::Ack, ip("192.168.10.101"))
+        );
+    }
+
+    #[test]
+    fn renew_acks_by_unicast_to_ciaddr() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("dd:dd:dd:dd:dd:dd", "192.168.10.102", 9999));
+        // RENEW: no server-id, no requested-ip, client address in ciaddr.
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "dd:dd:dd:dd:dd:dd",
+            ip("192.168.10.102"),
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("ack");
+        assert_eq!(dst, ReplyDst::Unicast(ip("192.168.10.102")));
+        assert_eq!(
+            reply_summary(&data),
+            (DhcpMessageType::Ack, ip("192.168.10.102"))
+        );
+        assert!(d.persist);
+    }
+
+    #[test]
+    fn request_for_wrong_ip_naks() {
+        let c = cfg("");
+        let mut s = store();
+        // SELECTING our server but asking for an address we would not assign.
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[server_id(), requested("192.168.10.200")],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("nak");
+        assert_eq!(dst, ReplyDst::Broadcast);
+        assert_eq!(reply_summary(&data).0, DhcpMessageType::Nak);
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn static_request_acks_without_persisting() {
+        let c = cfg("static=nas,ee:ee:ee:ee:ee:ee,192.168.10.50\n");
+        let mut s = store();
+        let pkt = packet(
+            DhcpMessageType::Request,
+            "ee:ee:ee:ee:ee:ee",
+            Ipv4Addr::UNSPECIFIED,
+            &[server_id()],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, _dst) = d.reply.expect("ack");
+        assert_eq!(
+            reply_summary(&data),
+            (DhcpMessageType::Ack, ip("192.168.10.50"))
+        );
+        assert!(!d.persist); // static bindings are never written to the store
+        assert_eq!(s.iter().count(), 0);
+    }
+
+    #[test]
+    fn release_removes_lease_and_persists() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("bb:bb:bb:bb:bb:bb", "192.168.10.100", 9999));
+        let pkt = packet(
+            DhcpMessageType::Release,
+            "bb:bb:bb:bb:bb:bb",
+            ip("192.168.10.100"),
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(d.persist);
+        assert_eq!(s.iter().count(), 0);
+    }
+
+    #[test]
+    fn release_unknown_mac_does_not_persist() {
+        let c = cfg("");
+        let mut s = store();
+        let pkt = packet(
+            DhcpMessageType::Release,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn decline_removes_lease_and_persists() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("bb:bb:bb:bb:bb:bb", "192.168.10.100", 9999));
+        let pkt = packet(
+            DhcpMessageType::Decline,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(d.persist);
+        assert_eq!(s.iter().count(), 0);
+    }
+
+    #[test]
+    fn pool_exhaustion_is_silent() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("11:11:11:11:11:11", "192.168.10.100", 9999));
+        s.insert(lease("22:22:22:22:22:22", "192.168.10.101", 9999));
+        s.insert(lease("33:33:33:33:33:33", "192.168.10.102", 9999));
+        let pkt = packet(
+            DhcpMessageType::Discover,
+            "99:99:99:99:99:99",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+    }
+
+    #[test]
+    fn unsupported_message_type_is_silent() {
+        let c = cfg("");
+        let mut s = store();
+        // An OFFER arriving at the server is not something we answer.
+        let pkt = packet(
+            DhcpMessageType::Offer,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn packet_without_message_type_is_silent() {
+        let c = cfg("");
+        let mut s = store();
+        let mut p = vec![0u8; MIN_LEN];
+        p[0] = BOOTREQUEST;
+        p[1] = HTYPE_ETHERNET;
+        p[2] = HLEN_ETHERNET;
+        p[28..34].copy_from_slice(&mac_bytes("bb:bb:bb:bb:bb:bb"));
+        p[COOKIE_OFFSET..MIN_LEN].copy_from_slice(&MAGIC_COOKIE);
+        let pkt = DhcpPacket::parse(&p).unwrap();
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
     }
 }
