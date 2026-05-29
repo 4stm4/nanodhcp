@@ -1,7 +1,9 @@
 //! The receive loop: parse a datagram, decide a response, send it, log it.
 
-use std::io;
+use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::config::DhcpConfig;
 use crate::dhcp::builder;
@@ -19,9 +21,24 @@ use super::socket::{self, CLIENT_PORT};
 /// transient, so we hold it for an hour rather than forever.
 const DECLINE_QUARANTINE_SECS: u64 = 3600;
 
-/// Bind the socket and serve forever. Only returns on a fatal socket error.
+/// How long `recv_from` blocks before yielding so the loop can notice a
+/// shutdown signal and check the purge timer.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often expired leases are swept from memory (and the lease file) while
+/// running, so a long-lived server does not accumulate stale entries.
+const PURGE_INTERVAL_SECS: u64 = 300;
+
+/// Set by the signal handler to ask the receive loop to exit cleanly.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Bind the socket and serve until a shutdown signal arrives.
 pub fn run(cfg: DhcpConfig) -> io::Result<()> {
     let sock = socket::bind(&cfg)?;
+    // A bounded read timeout turns the blocking receive into a poll so we can
+    // act on SIGTERM/SIGINT and run the periodic purge between datagrams.
+    sock.set_read_timeout(Some(POLL_INTERVAL))?;
+    install_signal_handlers();
     println!("nanodhcp: listening on {} udp/67", cfg.interface);
 
     let mut store = LeaseStore::load(&cfg.lease_file);
@@ -29,19 +46,67 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
     if purged > 0 {
         println!("nanodhcp: purged {} expired lease(s) at startup", purged);
     }
+    let mut next_purge = time::now() + PURGE_INTERVAL_SECS;
     let mut buf = [0u8; 1500];
 
-    loop {
-        let len = match sock.recv_from(&mut buf) {
-            Ok((len, _src)) => len,
-            Err(e) => {
-                eprintln!("nanodhcp: recv error: {}", e);
-                continue;
+    while !SHUTDOWN.load(Ordering::Relaxed) {
+        match sock.recv_from(&mut buf) {
+            Ok((len, _src)) => handle(&sock, &cfg, &mut store, &buf[..len]),
+            // A poll timeout (or a signal interrupting the syscall) is normal:
+            // fall through to the shutdown and purge checks below.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
+            Err(e) => eprintln!("nanodhcp: recv error: {}", e),
+        }
+
+        let now = time::now();
+        if now >= next_purge {
+            let removed = store.purge_expired(now);
+            if removed > 0 {
+                println!("nanodhcp: purged {} expired lease(s)", removed);
+                if let Err(e) = store.save() {
+                    eprintln!("nanodhcp: warning: cannot save leases: {}", e);
+                }
             }
-        };
-        handle(&sock, &cfg, &mut store, &buf[..len]);
+            next_purge = now + PURGE_INTERVAL_SECS;
+        }
+    }
+
+    println!("nanodhcp: received shutdown signal, exiting");
+    Ok(())
+}
+
+/// Install handlers for SIGTERM and SIGINT that ask the loop to stop. The
+/// handler only sets an atomic flag, which is async-signal-safe.
+#[cfg(unix)]
+fn install_signal_handlers() {
+    use std::os::raw::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIGTERM: c_int = 15;
+
+    extern "C" fn on_signal(_sig: c_int) {
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    }
+
+    extern "C" {
+        fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    }
+
+    // SAFETY: `on_signal` is a valid function pointer and does nothing but store
+    // to an atomic. We discard the previous handler (the returned value may be
+    // SIG_DFL/SIG_ERR, hence the `usize` return type rather than a fn pointer).
+    unsafe {
+        signal(SIGINT, on_signal);
+        signal(SIGTERM, on_signal);
     }
 }
+
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
 
 fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8]) {
     let pkt = match DhcpPacket::parse(data) {
