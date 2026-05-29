@@ -1,7 +1,7 @@
 # nanodhcp
 
 [![CI](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml/badge.svg)](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/4stm4/nanodhcp/branch/main/graph/badge.svg)](https://codecov.io/gh/4stm4/nanodhcp)
+[![coverage](https://raw.githubusercontent.com/4stm4/nanodhcp/badges/coverage.svg)](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml)
 [![version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![dependencies](https://img.shields.io/badge/dependencies-std_only-success.svg)](Cargo.toml)
