@@ -17,6 +17,7 @@ pub const OPT_REQUESTED_IP: u8 = 50;
 pub const OPT_LEASE_TIME: u8 = 51;
 pub const OPT_MSG_TYPE: u8 = 53;
 pub const OPT_SERVER_ID: u8 = 54;
+pub const OPT_PARAM_REQUEST_LIST: u8 = 55;
 pub const OPT_END: u8 = 255;
 
 /// Parsed DHCP options, in the order they appeared.
@@ -82,6 +83,17 @@ impl Options {
 
     pub fn server_id(&self) -> Option<Ipv4Addr> {
         ipv4(self.get(OPT_SERVER_ID))
+    }
+
+    /// Option 55 (Parameter Request List): the option codes the client wants,
+    /// in the order given. `None` when absent or empty.
+    pub fn param_request_list(&self) -> Option<&[u8]> {
+        let d = self.get(OPT_PARAM_REQUEST_LIST)?;
+        if d.is_empty() {
+            None
+        } else {
+            Some(d)
+        }
     }
 
     /// Client-provided hostname (option 12), sanitized to hostname-safe
@@ -266,5 +278,29 @@ mod tests {
         buf.push(OPT_END);
         let opts = Options::parse(&buf);
         assert_eq!(opts.hostname().as_deref(), Some("laptop"));
+    }
+
+    #[test]
+    fn param_request_list_is_read() {
+        let buf = [
+            OPT_PARAM_REQUEST_LIST,
+            3,
+            OPT_SUBNET_MASK,
+            OPT_ROUTER,
+            OPT_DNS,
+            OPT_END,
+        ];
+        let opts = Options::parse(&buf);
+        assert_eq!(
+            opts.param_request_list(),
+            Some(&[OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS][..])
+        );
+    }
+
+    #[test]
+    fn empty_param_request_list_is_none() {
+        let buf = [OPT_PARAM_REQUEST_LIST, 0, OPT_END];
+        let opts = Options::parse(&buf);
+        assert_eq!(opts.param_request_list(), None);
     }
 }

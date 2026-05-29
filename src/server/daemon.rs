@@ -14,6 +14,11 @@ use crate::util::time;
 
 use super::socket::{self, CLIENT_PORT};
 
+/// How long a declined address is held out of the pool. The conflict that
+/// prompts a DHCPDECLINE (another host already using the address) is usually
+/// transient, so we hold it for an hour rather than forever.
+const DECLINE_QUARANTINE_SECS: u64 = 3600;
+
 /// Bind the socket and serve forever. Only returns on a fatal socket error.
 pub fn run(cfg: DhcpConfig) -> io::Result<()> {
     let sock = socket::bind(&cfg)?;
@@ -185,14 +190,31 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
         }
 
         DhcpMessageType::Decline => {
-            // The client says the address is already in use, so drop our record
-            // and stop offering it.
+            // RFC 2131 §4.3.3: the client reports the address (option 50) is
+            // already in use. Drop our record and quarantine the address so the
+            // allocator stops handing it out until the conflict clears.
+            let declined = pkt
+                .options
+                .requested_ip()
+                .or_else(|| store.get(&mac).map(|l| l.ip))
+                .unwrap_or(pkt.ciaddr);
             let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
-            println!("nanodhcp: DECLINE mac={}", mac);
+            if !declined.is_unspecified() {
+                store.quarantine(declined, now + DECLINE_QUARANTINE_SECS);
+            }
+            println!("nanodhcp: DECLINE mac={} ip={}", mac, declined);
             Decision {
                 reply: None,
                 persist,
             }
+        }
+
+        DhcpMessageType::Inform => {
+            // RFC 2131 §4.3.5: the client already has an address and only wants
+            // configuration parameters. Reply with a DHCPACK carrying options
+            // but no yiaddr and no lease time, unicast to its ciaddr.
+            println!("nanodhcp: INFORM mac={} ciaddr={}", mac, pkt.ciaddr);
+            Decision::reply(builder::build_inform_ack(pkt, cfg), ack_dst(pkt))
         }
 
         other => {
@@ -229,7 +251,8 @@ mod tests {
     use super::*;
     use crate::config::parser::parse_config;
     use crate::dhcp::options::{
-        Options, OptionsWriter, OPT_MSG_TYPE, OPT_REQUESTED_IP, OPT_SERVER_ID,
+        Options, OptionsWriter, OPT_LEASE_TIME, OPT_MSG_TYPE, OPT_REQUESTED_IP, OPT_SERVER_ID,
+        OPT_SUBNET_MASK,
     };
     use crate::dhcp::packet::{
         BOOTREQUEST, COOKIE_OFFSET, HLEN_ETHERNET, HTYPE_ETHERNET, MAGIC_COOKIE, MIN_LEN,
@@ -507,7 +530,7 @@ lease_file=/tmp/nanodhcp-daemon-test
     }
 
     #[test]
-    fn decline_removes_lease_and_persists() {
+    fn decline_quarantines_declined_ip_and_persists() {
         let c = cfg("");
         let mut s = store();
         s.insert(lease("bb:bb:bb:bb:bb:bb", "192.168.10.100", 9999));
@@ -515,11 +538,47 @@ lease_file=/tmp/nanodhcp-daemon-test
             DhcpMessageType::Decline,
             "bb:bb:bb:bb:bb:bb",
             Ipv4Addr::UNSPECIFIED,
-            &[],
+            &[requested("192.168.10.100")],
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
         assert!(d.persist);
+        assert_eq!(s.iter().count(), 0);
+        assert!(s.is_quarantined(ip("192.168.10.100"), 1000));
+
+        // A fresh client must not be handed the quarantined address.
+        let disc = packet(
+            DhcpMessageType::Discover,
+            "99:99:99:99:99:99",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &disc, 1000);
+        let (data, _) = d.reply.expect("offer");
+        assert_eq!(reply_summary(&data).1, ip("192.168.10.101"));
+    }
+
+    #[test]
+    fn inform_acks_config_only_by_unicast() {
+        let c = cfg("");
+        let mut s = store();
+        // The client already holds an address (ciaddr) and only wants options.
+        let pkt = packet(
+            DhcpMessageType::Inform,
+            "bb:bb:bb:bb:bb:bb",
+            ip("192.168.10.150"),
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (data, dst) = d.reply.expect("inform ack");
+        assert_eq!(dst, ReplyDst::Unicast(ip("192.168.10.150")));
+        let (mt, yiaddr) = reply_summary(&data);
+        assert_eq!(mt, DhcpMessageType::Ack);
+        assert_eq!(yiaddr, Ipv4Addr::UNSPECIFIED); // no address assigned
+        let opts = Options::parse(&data[MIN_LEN..]);
+        assert!(opts.get(OPT_LEASE_TIME).is_none()); // no lease for an INFORM
+        assert!(opts.get(OPT_SUBNET_MASK).is_some());
+        assert!(!d.persist);
         assert_eq!(s.iter().count(), 0);
     }
 

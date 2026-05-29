@@ -10,6 +10,7 @@ use std::io::{self, ErrorKind, Write};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use crate::util::ip::to_u32;
 use crate::util::mac::MacAddr;
 
 use super::model::{Lease, LeaseKind};
@@ -17,6 +18,11 @@ use super::model::{Lease, LeaseKind};
 pub struct LeaseStore {
     path: PathBuf,
     by_mac: HashMap<MacAddr, Lease>,
+    /// Addresses a client declined (DHCPDECLINE, RFC 2131 §4.3.3) mapped to the
+    /// time the quarantine expires. In-memory only: a decline means the address
+    /// is in use by something we did not lease it to, but that conflict is
+    /// transient and need not survive a restart.
+    declined: HashMap<u32, u64>,
 }
 
 impl LeaseStore {
@@ -52,6 +58,7 @@ impl LeaseStore {
         LeaseStore {
             path: PathBuf::from(path),
             by_mac,
+            declined: HashMap::new(),
         }
     }
 
@@ -67,6 +74,19 @@ impl LeaseStore {
         self.by_mac.remove(mac)
     }
 
+    /// Mark `ip` as unusable until `until` (a Unix timestamp) because a client
+    /// reported it already in use via DHCPDECLINE.
+    pub fn quarantine(&mut self, ip: Ipv4Addr, until: u64) {
+        self.declined.insert(to_u32(ip), until);
+    }
+
+    /// Whether `ip` is currently quarantined as of `now`.
+    pub fn is_quarantined(&self, ip: Ipv4Addr, now: u64) -> bool {
+        self.declined
+            .get(&to_u32(ip))
+            .is_some_and(|until| *until > now)
+    }
+
     /// Drop dynamic leases that expired at or before `now`, returning how many
     /// were removed. Leases are keyed by MAC, so without this the store (and the
     /// lease file) would grow without bound as distinct clients come and go — an
@@ -74,6 +94,7 @@ impl LeaseStore {
     pub fn purge_expired(&mut self, now: u64) -> usize {
         let before = self.by_mac.len();
         self.by_mac.retain(|_, l| l.expires_at > now);
+        self.declined.retain(|_, until| *until > now);
         before - self.by_mac.len()
     }
 
@@ -185,5 +206,20 @@ mod tests {
         // An entry exactly at `now` is treated as expired.
         assert_eq!(store.purge_expired(5000), 1);
         assert_eq!(store.iter().count(), 0);
+    }
+
+    #[test]
+    fn quarantine_blocks_until_expiry() {
+        let mut store = LeaseStore::load("/nonexistent/nanodhcp/quarantine-test");
+        let ip: Ipv4Addr = "192.168.10.50".parse().unwrap();
+        assert!(!store.is_quarantined(ip, 1000));
+        store.quarantine(ip, 2000);
+        assert!(store.is_quarantined(ip, 1000));
+        // The boundary is treated as expired, matching lease semantics.
+        assert!(!store.is_quarantined(ip, 2000));
+        // Purging past expiry forgets the entry.
+        store.quarantine(ip, 2000);
+        store.purge_expired(3000);
+        assert!(!store.is_quarantined(ip, 0));
     }
 }

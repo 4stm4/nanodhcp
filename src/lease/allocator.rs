@@ -38,18 +38,19 @@ pub fn assign_ip(cfg: &DhcpConfig, store: &LeaseStore, mac: MacAddr, now: u64) -
             .iter()
             .any(|l| to_u32(l.ip) == ip && l.mac != mac && l.expires_at > now)
     };
+    let quarantined = |ip: u32| -> bool { store.is_quarantined(from_u32(ip), now) };
 
     // 2. Reuse the MAC's previous IP when it is in-pool and not otherwise taken.
     if let Some(lease) = store.get(&mac) {
         let ip = to_u32(lease.ip);
-        if ip >= start && ip <= end && !reserved(ip) && !taken_by_other(ip) {
+        if ip >= start && ip <= end && !reserved(ip) && !taken_by_other(ip) && !quarantined(ip) {
             return Some(from_u32(ip));
         }
     }
 
     // 3. First free address in the pool.
     for ip in start..=end {
-        if !reserved(ip) && !taken_by_other(ip) {
+        if !reserved(ip) && !taken_by_other(ip) && !quarantined(ip) {
             return Some(from_u32(ip));
         }
     }
@@ -149,6 +150,27 @@ lease_file=/tmp/nanodhcp-test-leases
         // Static at .100 means the first dynamic IP must be .101.
         let c = cfg("static=nas,dd:dd:dd:dd:dd:dd,192.168.10.100\n");
         let store = empty_store();
+        let ip = assign_ip(&c, &store, mac("bb:bb:bb:bb:bb:bb"), 1000).unwrap();
+        assert_eq!(ip, "192.168.10.101".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn quarantined_ip_is_skipped() {
+        let c = cfg("");
+        let mut store = empty_store();
+        // .100 was declined and is quarantined past `now`.
+        store.quarantine("192.168.10.100".parse().unwrap(), 5000);
+        let ip = assign_ip(&c, &store, mac("bb:bb:bb:bb:bb:bb"), 1000).unwrap();
+        assert_eq!(ip, "192.168.10.101".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn quarantine_skips_clients_own_prior_ip() {
+        let c = cfg("");
+        let mut store = empty_store();
+        store.insert(lease("bb:bb:bb:bb:bb:bb", "192.168.10.100", 5000));
+        // The client previously held .100 but just declined it.
+        store.quarantine("192.168.10.100".parse().unwrap(), 5000);
         let ip = assign_ip(&c, &store, mac("bb:bb:bb:bb:bb:bb"), 1000).unwrap();
         assert_eq!(ip, "192.168.10.101".parse::<Ipv4Addr>().unwrap());
     }

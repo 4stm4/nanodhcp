@@ -30,7 +30,13 @@ fn base_reply(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr) -> Vec<u8> {
     p
 }
 
-fn build(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr, mt: DhcpMessageType) -> Vec<u8> {
+fn build(
+    req: &DhcpPacket,
+    cfg: &DhcpConfig,
+    yiaddr: Ipv4Addr,
+    mt: DhcpMessageType,
+    include_lease: bool,
+) -> Vec<u8> {
     let mut packet = base_reply(req, cfg, yiaddr);
 
     let mut w = OptionsWriter::new();
@@ -39,12 +45,26 @@ fn build(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr, mt: DhcpMessageTy
 
     // NAK carries no configuration parameters.
     if mt != DhcpMessageType::Nak {
-        w.push_u32(options::OPT_LEASE_TIME, cfg.lease_time);
+        // Honour the client's Parameter Request List (option 55) for optional
+        // parameters: when it is present, send a parameter only if asked for.
+        // Subnet mask is fundamental and always sent; lease time accompanies an
+        // address grant (OFFER/ACK) but not an INFORM reply.
+        let prl = req.options.param_request_list();
+        let wants = |code: u8| match prl {
+            Some(list) => list.contains(&code),
+            None => true,
+        };
+
+        if include_lease {
+            w.push_u32(options::OPT_LEASE_TIME, cfg.lease_time);
+        }
         w.push_ipv4(options::OPT_SUBNET_MASK, cfg.subnet_mask);
         if let Some(router) = cfg.router {
-            w.push_ipv4(options::OPT_ROUTER, router);
+            if wants(options::OPT_ROUTER) {
+                w.push_ipv4(options::OPT_ROUTER, router);
+            }
         }
-        if !cfg.dns.is_empty() {
+        if !cfg.dns.is_empty() && wants(options::OPT_DNS) {
             w.push_ipv4_list(options::OPT_DNS, &cfg.dns);
         }
     }
@@ -54,15 +74,21 @@ fn build(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr, mt: DhcpMessageTy
 }
 
 pub fn build_offer(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr) -> Vec<u8> {
-    build(req, cfg, yiaddr, DhcpMessageType::Offer)
+    build(req, cfg, yiaddr, DhcpMessageType::Offer, true)
 }
 
 pub fn build_ack(req: &DhcpPacket, cfg: &DhcpConfig, yiaddr: Ipv4Addr) -> Vec<u8> {
-    build(req, cfg, yiaddr, DhcpMessageType::Ack)
+    build(req, cfg, yiaddr, DhcpMessageType::Ack, true)
 }
 
 pub fn build_nak(req: &DhcpPacket, cfg: &DhcpConfig) -> Vec<u8> {
-    build(req, cfg, Ipv4Addr::UNSPECIFIED, DhcpMessageType::Nak)
+    build(req, cfg, Ipv4Addr::UNSPECIFIED, DhcpMessageType::Nak, false)
+}
+
+/// Build a DHCPACK in reply to a DHCPINFORM: configuration parameters only,
+/// with no yiaddr and no lease time (RFC 2131 §4.3.5).
+pub fn build_inform_ack(req: &DhcpPacket, cfg: &DhcpConfig) -> Vec<u8> {
+    build(req, cfg, Ipv4Addr::UNSPECIFIED, DhcpMessageType::Ack, false)
 }
 
 #[cfg(test)]
@@ -102,6 +128,22 @@ lease_file=/tmp/leases
         DhcpPacket::parse(&p).unwrap()
     }
 
+    /// A request carrying additional option bytes between the message type and
+    /// the End marker (used to attach a Parameter Request List).
+    fn request_with(extra: &[u8]) -> DhcpPacket {
+        let mut p = vec![0u8; MIN_LEN];
+        p[0] = 1;
+        p[1] = HTYPE_ETHERNET;
+        p[2] = HLEN_ETHERNET;
+        p[4..8].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        p[28..34].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        p[COOKIE_OFFSET..MIN_LEN].copy_from_slice(&MAGIC_COOKIE);
+        p.extend_from_slice(&[options::OPT_MSG_TYPE, 1, 1]);
+        p.extend_from_slice(extra);
+        p.push(options::OPT_END);
+        DhcpPacket::parse(&p).unwrap()
+    }
+
     #[test]
     fn offer_has_expected_header_and_options() {
         let cfg = cfg();
@@ -135,5 +177,37 @@ lease_file=/tmp/leases
         assert_eq!(opts.msg_type(), Some(DhcpMessageType::Nak));
         assert!(opts.get(options::OPT_SUBNET_MASK).is_none());
         assert!(opts.get(options::OPT_LEASE_TIME).is_none());
+    }
+
+    #[test]
+    fn prl_filters_optional_params() {
+        // Client asks for the subnet mask only: router and DNS must be withheld
+        // even though they are configured. The mask and lease time are sent
+        // regardless (mask is fundamental, lease accompanies the grant).
+        let cfg = cfg();
+        let req = request_with(&[options::OPT_PARAM_REQUEST_LIST, 1, options::OPT_SUBNET_MASK]);
+        let yiaddr = Ipv4Addr::new(192, 168, 10, 100);
+        let reply = build_offer(&req, &cfg, yiaddr);
+
+        let opts = Options::parse(&reply[MIN_LEN..]);
+        assert!(opts.get(options::OPT_SUBNET_MASK).is_some());
+        assert!(opts.get(options::OPT_LEASE_TIME).is_some());
+        assert!(opts.get(options::OPT_ROUTER).is_none());
+        assert!(opts.get(options::OPT_DNS).is_none());
+    }
+
+    #[test]
+    fn inform_ack_has_params_but_no_yiaddr_or_lease() {
+        let cfg = cfg();
+        let req = request();
+        let reply = build_inform_ack(&req, &cfg);
+
+        assert_eq!(&reply[16..20], &[0, 0, 0, 0]); // yiaddr zeroed
+        let opts = Options::parse(&reply[MIN_LEN..]);
+        assert_eq!(opts.msg_type(), Some(DhcpMessageType::Ack));
+        assert!(opts.get(options::OPT_LEASE_TIME).is_none());
+        assert!(opts.get(options::OPT_SUBNET_MASK).is_some());
+        assert!(opts.get(options::OPT_ROUTER).is_some());
+        assert!(opts.get(options::OPT_DNS).is_some());
     }
 }
