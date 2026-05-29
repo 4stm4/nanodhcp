@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml/badge.svg)](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml)
 [![coverage](https://raw.githubusercontent.com/4stm4/nanodhcp/badges/coverage.svg)](https://github.com/4stm4/nanodhcp/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![dependencies](https://img.shields.io/badge/dependencies-std_only-success.svg)](Cargo.toml)
 
@@ -44,6 +44,9 @@ nanodhcp /etc/nanodhcp.conf             # alias for `run -c ...`
 
 Binding UDP port 67 requires root (or `CAP_NET_BIND_SERVICE` +
 `CAP_NET_RAW` for `SO_BINDTODEVICE`).
+
+Add `-q`/`--quiet` (warnings and errors only) or `-v`/`--verbose` (also
+per-packet debug detail) to `run` to change log verbosity.
 
 ## Configuration
 
@@ -95,15 +98,16 @@ order: a static binding, the MAC's previous IP, then the first free pool
 address. See [`docs/protocol.md`](docs/protocol.md) and
 [`docs/leases.md`](docs/leases.md).
 
-Logs go to stdout/stderr:
+Logs are timestamped (UTC) and leveled. Warnings and errors go to stderr, info
+and debug to stdout:
 
 ```
-nanodhcp: listening on eth0 udp/67
-nanodhcp: DISCOVER mac=aa:bb:cc:dd:ee:ff hostname=laptop
-nanodhcp: OFFER ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
-nanodhcp: REQUEST ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
-nanodhcp: ACK ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
-nanodhcp: ignored malformed packet: invalid magic cookie
+2026-05-29T08:41:20Z [INFO] listening on eth0 udp/67
+2026-05-29T08:41:21Z [INFO] DISCOVER mac=aa:bb:cc:dd:ee:ff hostname=laptop
+2026-05-29T08:41:21Z [INFO] OFFER ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
+2026-05-29T08:41:21Z [INFO] REQUEST ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
+2026-05-29T08:41:21Z [INFO] ACK ip=192.168.10.100 mac=aa:bb:cc:dd:ee:ff
+2026-05-29T08:41:30Z [DEBUG] ignored malformed packet: invalid magic cookie
 ```
 
 ## Project layout

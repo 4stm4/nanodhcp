@@ -14,20 +14,31 @@ client                         nanodhcp
   | <-- DHCPACK (bcast) ---------- |
 ```
 
-- A `DHCPREQUEST` carrying a server identifier (option 54) that is **not**
-  this server is ignored — another server owns that exchange (SELECTING).
-- A `DHCPREQUEST` *without* a server identifier (INIT-REBOOT) from a client we
-  have no dynamic lease or static binding for is also ignored, per RFC 2131
-  §4.3.2 — a server that knows the client should answer instead.
+- **SELECTING** — a `DHCPREQUEST` carrying a server identifier (option 54):
+  if it names this server we commit the lease and `DHCPACK`; if it names
+  another server we stay silent — that server owns the exchange.
+- **INIT-REBOOT** — a `DHCPREQUEST` *without* a server identifier from a client
+  we have no dynamic lease or static binding for is ignored, per RFC 2131
+  §4.3.2: a server that knows the client should answer instead.
+- **RENEWING / REBINDING** — a known client whose address is in `ciaddr` is
+  re-ACKed; the reply is **unicast to `ciaddr`** since the client is reachable
+  there.
 - If the requested address is not the one we would grant, the server replies
-  with `DHCPNAK`.
-- `DHCPRELEASE` drops the dynamic lease for that MAC. `DHCPDECLINE` is logged
-  and the lease dropped (no conflict table in v0.1).
-- Replies are sent to the limited broadcast address `255.255.255.255:68`.
-  There is no relay support, so `giaddr` is expected to be zero.
+  with `DHCPNAK`, which is **always broadcast** (the client's idea of its own
+  address is wrong, so it may be unreachable by unicast).
+- `DHCPRELEASE` drops the dynamic lease for that MAC.
+- `DHCPDECLINE` drops the lease and **quarantines** the declined address for one
+  hour (RFC 2131 §4.3.3) so the allocator stops offering it while the conflict
+  lasts. The quarantine is in memory only and does not survive a restart.
+- `DHCPINFORM` is answered with a `DHCPACK` that carries configuration options
+  but **no `yiaddr` and no lease time** (RFC 2131 §4.3.5), unicast to `ciaddr`.
+- A reply is **broadcast** to `255.255.255.255:68` while the client is still
+  acquiring an address (`ciaddr` zero), and **unicast to `ciaddr`** once it
+  holds one (renew / inform). There is no relay support, so `giaddr` is
+  expected to be zero.
 
-> v0.1 covers the common SELECTING and INIT-REBOOT request paths; the full
-> RENEWING / REBINDING unicast state matrix is not yet modelled.
+> v0.2 handles SELECTING, INIT-REBOOT, RENEWING/REBINDING, INFORM and DECLINE.
+> There is no authentication, relay, or server-to-server failover.
 
 ## Packet structure
 
@@ -69,10 +80,16 @@ Parsed/emitted options:
 | 51   | IP Address Lease Time | emit           |
 | 53   | DHCP Message Type   | parse + emit     |
 | 54   | Server Identifier   | parse + emit     |
+| 55   | Parameter Request List | parse         |
 | 255  | End                 | parse + emit     |
 
 Each option is `code, len, len bytes`, except `Pad` (0) and `End` (255) which
 have no length or value. Unknown options are kept verbatim and ignored.
+
+When a client sends a Parameter Request List (option 55), the *optional* emitted
+parameters — Router (3) and DNS Servers (6) — are sent only if the client asked
+for them. Subnet Mask, Lease Time, Server Identifier and Message Type are always
+sent.
 
 ## Parser guarantees
 
@@ -86,6 +103,10 @@ The packet parser is defensive against hostile input and never panics:
 - a malformed packet returns `Err(...)` and is logged and dropped — it does not
   affect the daemon;
 - no `unwrap` on untrusted packet bytes.
+
+These guarantees are backed by randomized tests (`cargo test`) that feed the
+parser hundreds of thousands of arbitrary buffers and arbitrary option streams,
+asserting it never panics or over-reads.
 
 The hostname from option 12 is sanitized to hostname-safe characters before it
 is logged, so a client cannot inject control characters into the logs.

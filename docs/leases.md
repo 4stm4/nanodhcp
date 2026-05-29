@@ -40,7 +40,8 @@ An address is never handed out if it is:
 - the subnet network or broadcast address,
 - a static binding's IP,
 - outside `[pool_start, pool_end]`,
-- currently leased to a *different* MAC and not yet expired.
+- currently leased to a *different* MAC and not yet expired,
+- currently quarantined after a `DHCPDECLINE` (see below).
 
 An expired lease belonging to another MAC is reclaimable; a client always keeps
 priority on its own previous address while that address remains free.
@@ -50,3 +51,23 @@ priority on its own previous address while that address remains free.
 A dynamic lease is written to disk only after the server sends a `DHCPACK`
 (i.e. on `REQUEST`, not on `DISCOVER`). The expiry is `now + lease_time`.
 Static bindings are answered directly and produce no file write.
+
+## Expiry and purge
+
+Leases are keyed by MAC and expire at the stored timestamp. Expired entries are
+swept:
+
+- at startup, when the lease file is loaded;
+- periodically while running (every 5 minutes).
+
+The file is rewritten when a sweep removes anything. Without this an expired
+entry is never reclaimed and the lease file would grow without bound as clients
+come and go.
+
+## Declined addresses (quarantine)
+
+A `DHCPDECLINE` reports that the offered address is already in use by another
+host. nanodhcp drops its record of the lease and quarantines that address for
+one hour, during which the allocator will not offer it again. The quarantine
+lives in memory only — the conflict is usually transient, so it is neither
+written to the lease file nor preserved across a restart.
