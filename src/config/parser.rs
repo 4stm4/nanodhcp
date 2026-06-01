@@ -90,6 +90,9 @@ fn parse_static(value: &str) -> Result<StaticLease, String> {
     if parts.len() != 3 {
         return Err(format!("static must be 'name,mac,ip', got '{}'", value));
     }
+    if parts[0].is_empty() {
+        return Err("static name must not be empty".to_string());
+    }
     let mac = parts[1].parse::<MacAddr>()?;
     let ip = ip::parse_ipv4(parts[2])?;
     Ok(StaticLease {
@@ -189,6 +192,13 @@ static=printer,11:22:33:44:55:66,192.168.10.11
         let text = "static=onlyname\n";
         let err = parse_config(text).unwrap_err();
         assert!(err.contains("static must be"));
+    }
+
+    #[test]
+    fn empty_static_name_is_error() {
+        let text = "static=,aa:bb:cc:dd:ee:ff,192.168.10.10\n";
+        let err = parse_config(text).unwrap_err();
+        assert!(err.contains("name must not be empty"));
     }
 
     #[test]
