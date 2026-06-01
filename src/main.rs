@@ -91,18 +91,22 @@ fn parse_run_args(rest: &[String]) -> Result<RunArgs, String> {
     Ok(RunArgs { path, level })
 }
 
-/// Extract the value of `-c`/`--config` from the remaining arguments.
+/// Resolve the config path for `check`/`leases`. Accepts `-c <path>`,
+/// `--config <path>`, or a bare path argument (`nanodhcp check <config>`),
+/// mirroring the `nanodhcp <config>` alias for `run`.
 fn config_path(rest: &[String]) -> Result<String, String> {
     match rest.first().map(|s| s.as_str()) {
         Some("-c") | Some("--config") => rest
             .get(1)
             .cloned()
             .ok_or_else(|| "option -c requires a path".to_string()),
-        Some(other) => Err(format!(
-            "unexpected argument '{}', expected -c <config>",
-            other
+        // Reject a stray option, but take a bare path as the config.
+        Some(opt) if opt.starts_with('-') => Err(format!(
+            "unexpected option '{}', expected -c <config> or a config path",
+            opt
         )),
-        None => Err("missing -c <config>".to_string()),
+        Some(path) => Ok(path.to_string()),
+        None => Err("missing config path (use -c <config> or pass it directly)".to_string()),
     }
 }
 
