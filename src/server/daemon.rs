@@ -165,6 +165,15 @@ impl Decision {
 /// in memory. Performs no socket or disk I/O, so the whole protocol state
 /// machine is unit-testable; the caller persists and sends.
 fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) -> Decision {
+    // We serve one directly-attached LAN and do not implement BOOTP relay
+    // (RFC 2131 §4): a non-zero giaddr means the packet came through a relay
+    // agent and must be answered via it, which we cannot do. Drop it rather
+    // than mis-handle it as a local request.
+    if !pkt.giaddr.is_unspecified() {
+        log_debug!("ignored relayed packet giaddr={}", pkt.giaddr);
+        return Decision::silent();
+    }
+
     let mtype = match pkt.options.msg_type() {
         Some(m) => m,
         None => {
@@ -273,11 +282,20 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
         }
 
         DhcpMessageType::Inform => {
-            // RFC 2131 §4.3.5: the client already has an address and only wants
-            // configuration parameters. Reply with a DHCPACK carrying options
-            // but no yiaddr and no lease time, unicast to its ciaddr.
+            // RFC 2131 §4.3.5: the client already has an address, puts it in
+            // ciaddr, and only wants configuration parameters. The reply is
+            // unicast to that ciaddr, so a zero ciaddr is invalid — ignore it.
+            if pkt.ciaddr.is_unspecified() {
+                log_debug!("ignored INFORM with zero ciaddr from mac={}", mac);
+                return Decision::silent();
+            }
+            // DHCPACK with options but no yiaddr and no lease time, unicast to
+            // ciaddr (the client holds an address, so it can receive unicast).
             log_info!("INFORM mac={} ciaddr={}", mac, pkt.ciaddr);
-            Decision::reply(builder::build_inform_ack(pkt, cfg), ack_dst(pkt))
+            Decision::reply(
+                builder::build_inform_ack(pkt, cfg),
+                ReplyDst::Unicast(pkt.ciaddr),
+            )
         }
 
         other => {
@@ -287,11 +305,19 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
     }
 }
 
+/// Whether the client set the broadcast flag (RFC 2131 §4.1, flags bit 15): it
+/// cannot accept a unicast reply until its IP stack is configured and asks the
+/// server to broadcast instead.
+fn wants_broadcast(pkt: &DhcpPacket) -> bool {
+    pkt.flags & 0x8000 != 0
+}
+
 /// Destination for an ACK. A renewing client (non-zero `ciaddr`) can receive
 /// unicast; one still acquiring an address (`ciaddr` zero, from SELECTING or
-/// INIT-REBOOT) is answered by broadcast, which it hears before ARP is set up.
+/// INIT-REBOOT) — or any client that set the broadcast flag — is answered by
+/// broadcast, which it hears before ARP is set up.
 fn ack_dst(pkt: &DhcpPacket) -> ReplyDst {
-    if pkt.ciaddr.is_unspecified() {
+    if pkt.ciaddr.is_unspecified() || wants_broadcast(pkt) {
         ReplyDst::Broadcast
     } else {
         ReplyDst::Unicast(pkt.ciaddr)
@@ -692,5 +718,58 @@ lease_file=/tmp/nanodhcp-daemon-test
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
         assert!(!d.persist);
+    }
+
+    #[test]
+    fn relayed_packet_is_ignored() {
+        let c = cfg("");
+        let mut s = store();
+        // A non-zero giaddr means the packet arrived via a BOOTP relay, which we
+        // do not support; it must be dropped, not handled as a local request.
+        let mut pkt = packet(
+            DhcpMessageType::Discover,
+            "aa:aa:aa:aa:aa:aa",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        pkt.giaddr = ip("192.168.10.254");
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn inform_with_zero_ciaddr_is_ignored() {
+        let c = cfg("");
+        let mut s = store();
+        // A DHCPINFORM must carry the client's address in ciaddr; zero is invalid.
+        let pkt = packet(
+            DhcpMessageType::Inform,
+            "bb:bb:bb:bb:bb:bb",
+            Ipv4Addr::UNSPECIFIED,
+            &[],
+        );
+        let d = decide(&c, &mut s, &pkt, 1000);
+        assert!(d.reply.is_none());
+        assert!(!d.persist);
+    }
+
+    #[test]
+    fn broadcast_flag_forces_broadcast_ack() {
+        let c = cfg("");
+        let mut s = store();
+        s.insert(lease("dd:dd:dd:dd:dd:dd", "192.168.10.102", 9999));
+        // A renewing client (non-zero ciaddr) would normally get a unicast ACK,
+        // but with the broadcast flag set the reply must be broadcast.
+        let mut pkt = packet(
+            DhcpMessageType::Request,
+            "dd:dd:dd:dd:dd:dd",
+            ip("192.168.10.102"),
+            &[],
+        );
+        pkt.flags = 0x8000;
+        let d = decide(&c, &mut s, &pkt, 1000);
+        let (_, dst) = d.reply.expect("ack");
+        assert_eq!(dst, ReplyDst::Broadcast);
     }
 }
