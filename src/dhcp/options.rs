@@ -135,8 +135,17 @@ impl OptionsWriter {
     }
 
     pub fn push(&mut self, code: u8, data: &[u8]) {
-        // DHCP option payloads are at most 255 bytes; our values are tiny.
-        debug_assert!(data.len() <= u8::MAX as usize);
+        // A DHCP option length is a single byte, so the payload cannot exceed
+        // 255 bytes. Every value we write is small and bounded (config
+        // validation caps the DNS list at 63 servers), so this never fires from
+        // client input — but assert rather than let `data.len() as u8` silently
+        // truncate and emit a corrupt option if a future caller overflows it.
+        assert!(
+            data.len() <= u8::MAX as usize,
+            "DHCP option {} payload is {} bytes, exceeds 255",
+            code,
+            data.len()
+        );
         self.buf.push(code);
         self.buf.push(data.len() as u8);
         self.buf.extend_from_slice(data);
