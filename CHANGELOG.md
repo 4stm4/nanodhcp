@@ -4,6 +4,30 @@ All notable changes to nanodhcp are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-06-01
+
+### Added
+- Honor the client broadcast flag (RFC 2131 §4.1): the `DHCPACK` is broadcast
+  whenever `flags` bit 15 is set, not only when `ciaddr` is zero.
+- `check` and `leases` accept a bare config path (e.g.
+  `nanodhcp check /etc/nanodhcp/nanodhcp.conf`) in addition to `-c`/`--config`.
+
+### Fixed
+- Ignore packets with a non-zero `giaddr`: they arrived through a BOOTP relay,
+  which a single-LAN server cannot answer correctly.
+- Ignore a `DHCPINFORM` whose `ciaddr` is zero — there is no address to unicast
+  the reply to (RFC 2131 §4.3.5).
+- Reject a `static=` binding with an empty name.
+- `OptionsWriter::push` now asserts the payload fits in the one-byte option
+  length instead of silently truncating in release builds.
+
+### Changed
+- `purge_expired` reports expired leases and quarantines separately; the lease
+  file is rewritten only when a lease actually changed, and released quarantines
+  are logged on their own.
+- Renamed the internal `Decision.persist` flag to `save_leases` to separate
+  "rewrite the lease file" from "the in-memory store changed".
+
 ## [0.2.0] - 2026-05-29
 
 ### Added

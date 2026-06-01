@@ -32,13 +32,19 @@ client                         nanodhcp
   lasts. The quarantine is in memory only and does not survive a restart.
 - `DHCPINFORM` is answered with a `DHCPACK` that carries configuration options
   but **no `yiaddr` and no lease time** (RFC 2131 §4.3.5), unicast to `ciaddr`.
+  A `DHCPINFORM` with a zero `ciaddr` is **ignored** — there is no address to
+  reply to.
 - A reply is **broadcast** to `255.255.255.255:68` while the client is still
-  acquiring an address (`ciaddr` zero), and **unicast to `ciaddr`** once it
-  holds one (renew / inform). There is no relay support, so `giaddr` is
-  expected to be zero.
+  acquiring an address (`ciaddr` zero) or whenever it sets the broadcast flag
+  (RFC 2131 §4.1, `flags` bit 15), and **unicast to `ciaddr`** otherwise (renew
+  / inform).
+- There is no relay support: a packet with a **non-zero `giaddr`** arrived
+  through a BOOTP relay and is **ignored**, because the reply would have to
+  return via the relay rather than onto the local LAN.
 
-> v0.2 handles SELECTING, INIT-REBOOT, RENEWING/REBINDING, INFORM and DECLINE.
-> There is no authentication, relay, or server-to-server failover.
+> v0.3 tightens these edge cases (relayed packets, zero-`ciaddr` INFORM, the
+> broadcast flag). nanodhcp serves a single directly-attached LAN only: no
+> authentication, relay, or server-to-server failover.
 
 ## Packet structure
 
