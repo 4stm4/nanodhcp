@@ -119,7 +119,7 @@ fn handle(sock: &UdpSocket, cfg: &DhcpConfig, store: &mut LeaseStore, data: &[u8
     };
 
     let decision = decide(cfg, store, &pkt, time::now());
-    if decision.persist {
+    if decision.save_leases {
         if let Err(e) = store.save() {
             log_warn!("cannot save leases: {}", e);
         }
@@ -139,24 +139,25 @@ enum ReplyDst {
 }
 
 /// Outcome of processing one packet: an optional reply (bytes + destination)
-/// and whether the in-memory lease store changed and must be written to disk.
+/// and whether the lease file must be rewritten — i.e. a dynamic lease was
+/// added or removed. Quarantine changes are in-memory only and never set this.
 struct Decision {
     reply: Option<(Vec<u8>, ReplyDst)>,
-    persist: bool,
+    save_leases: bool,
 }
 
 impl Decision {
     fn silent() -> Decision {
         Decision {
             reply: None,
-            persist: false,
+            save_leases: false,
         }
     }
 
     fn reply(data: Vec<u8>, dst: ReplyDst) -> Decision {
         Decision {
             reply: Some((data, dst)),
-            persist: false,
+            save_leases: false,
         }
     }
 }
@@ -225,7 +226,7 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
                 // Honour the request only if the client wants the address we
                 // would give it (or expressed no preference).
                 Some(ip) if requested.is_unspecified() || requested == ip => {
-                    let mut persist = false;
+                    let mut save_leases = false;
                     if cfg.static_for(mac).is_none() {
                         store.purge_expired(now);
                         store.insert(Lease {
@@ -235,12 +236,12 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
                             expires_at: now + cfg.lease_time as u64,
                             kind: LeaseKind::Dynamic,
                         });
-                        persist = true;
+                        save_leases = true;
                     }
                     log_info!("ACK ip={} mac={}", ip, mac);
                     Decision {
                         reply: Some((builder::build_ack(pkt, cfg, ip), ack_dst(pkt))),
-                        persist,
+                        save_leases,
                     }
                 }
                 _ => {
@@ -253,11 +254,11 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
         }
 
         DhcpMessageType::Release => {
-            let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
+            let save_leases = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
             log_info!("RELEASE mac={}", mac);
             Decision {
                 reply: None,
-                persist,
+                save_leases,
             }
         }
 
@@ -270,14 +271,14 @@ fn decide(cfg: &DhcpConfig, store: &mut LeaseStore, pkt: &DhcpPacket, now: u64) 
                 .requested_ip()
                 .or_else(|| store.get(&mac).map(|l| l.ip))
                 .unwrap_or(pkt.ciaddr);
-            let persist = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
+            let save_leases = cfg.static_for(mac).is_none() && store.remove(&mac).is_some();
             if !declined.is_unspecified() {
                 store.quarantine(declined, now + DECLINE_QUARANTINE_SECS);
             }
             log_info!("DECLINE mac={} ip={}", mac, declined);
             Decision {
                 reply: None,
-                persist,
+                save_leases,
             }
         }
 
@@ -449,7 +450,7 @@ lease_file=/tmp/nanodhcp-daemon-test
             reply_summary(&data),
             (DhcpMessageType::Offer, ip("192.168.10.100"))
         );
-        assert!(!d.persist);
+        assert!(!d.save_leases);
         // An OFFER reserves nothing.
         assert!(s.get(&"aa:aa:aa:aa:aa:aa".parse().unwrap()).is_none());
     }
@@ -468,7 +469,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         let (data, dst) = d.reply.expect("ack");
         assert_eq!(dst, ReplyDst::Broadcast); // ciaddr zero in SELECTING
         assert_eq!(reply_summary(&data).0, DhcpMessageType::Ack);
-        assert!(d.persist);
+        assert!(d.save_leases);
         let stored = s.get(&"bb:bb:bb:bb:bb:bb".parse().unwrap()).unwrap();
         assert_eq!(stored.ip, ip("192.168.10.100"));
         assert_eq!(stored.expires_at, 1000 + 3600);
@@ -487,7 +488,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
         assert_eq!(s.iter().count(), 0);
     }
 
@@ -503,7 +504,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -545,7 +546,7 @@ lease_file=/tmp/nanodhcp-daemon-test
             reply_summary(&data),
             (DhcpMessageType::Ack, ip("192.168.10.102"))
         );
-        assert!(d.persist);
+        assert!(d.save_leases);
     }
 
     #[test]
@@ -563,7 +564,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         let (data, dst) = d.reply.expect("nak");
         assert_eq!(dst, ReplyDst::Broadcast);
         assert_eq!(reply_summary(&data).0, DhcpMessageType::Nak);
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -582,7 +583,7 @@ lease_file=/tmp/nanodhcp-daemon-test
             reply_summary(&data),
             (DhcpMessageType::Ack, ip("192.168.10.50"))
         );
-        assert!(!d.persist); // static bindings are never written to the store
+        assert!(!d.save_leases); // static bindings are never written to the store
         assert_eq!(s.iter().count(), 0);
     }
 
@@ -599,7 +600,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(d.persist);
+        assert!(d.save_leases);
         assert_eq!(s.iter().count(), 0);
     }
 
@@ -615,7 +616,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -631,7 +632,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(d.persist);
+        assert!(d.save_leases);
         assert_eq!(s.iter().count(), 0);
         assert!(s.is_quarantined(ip("192.168.10.100"), 1000));
 
@@ -667,7 +668,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         let opts = Options::parse(&data[MIN_LEN..]);
         assert!(opts.get(OPT_LEASE_TIME).is_none()); // no lease for an INFORM
         assert!(opts.get(OPT_SUBNET_MASK).is_some());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
         assert_eq!(s.iter().count(), 0);
     }
 
@@ -701,7 +702,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -717,7 +718,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         let pkt = DhcpPacket::parse(&p).unwrap();
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -735,7 +736,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         pkt.giaddr = ip("192.168.10.254");
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
@@ -751,7 +752,7 @@ lease_file=/tmp/nanodhcp-daemon-test
         );
         let d = decide(&c, &mut s, &pkt, 1000);
         assert!(d.reply.is_none());
-        assert!(!d.persist);
+        assert!(!d.save_leases);
     }
 
     #[test]
