@@ -15,6 +15,15 @@ use crate::util::mac::MacAddr;
 
 use super::model::{Lease, LeaseKind};
 
+/// How many entries a [`LeaseStore::purge_expired`] call removed, split by kind
+/// so the caller can tell whether the lease file actually needs rewriting: only
+/// `leases` are persisted, quarantine entries live in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeStats {
+    pub leases: usize,
+    pub quarantined: usize,
+}
+
 pub struct LeaseStore {
     path: PathBuf,
     by_mac: HashMap<MacAddr, Lease>,
@@ -84,15 +93,20 @@ impl LeaseStore {
             .is_some_and(|until| *until > now)
     }
 
-    /// Drop dynamic leases that expired at or before `now`, returning how many
-    /// were removed. Leases are keyed by MAC, so without this the store (and the
-    /// lease file) would grow without bound as distinct clients come and go — an
-    /// expired entry is otherwise never reclaimed.
-    pub fn purge_expired(&mut self, now: u64) -> usize {
-        let before = self.by_mac.len();
+    /// Drop dynamic leases and quarantine entries that expired at or before
+    /// `now`, reporting how many of each were removed. Leases are keyed by MAC,
+    /// so without this the store (and the lease file) would grow without bound
+    /// as distinct clients come and go — an expired entry is otherwise never
+    /// reclaimed.
+    pub fn purge_expired(&mut self, now: u64) -> PurgeStats {
+        let leases_before = self.by_mac.len();
         self.by_mac.retain(|_, l| l.expires_at > now);
+        let quarantined_before = self.declined.len();
         self.declined.retain(|_, until| *until > now);
-        before - self.by_mac.len()
+        PurgeStats {
+            leases: leases_before - self.by_mac.len(),
+            quarantined: quarantined_before - self.declined.len(),
+        }
     }
 
     /// All dynamic leases, sorted by IP for stable output.
@@ -197,11 +211,11 @@ mod tests {
         store.insert(parse_line("aa:aa:aa:aa:aa:aa 192.168.10.10 - 100").unwrap());
         store.insert(parse_line("bb:bb:bb:bb:bb:bb 192.168.10.11 - 5000").unwrap());
 
-        assert_eq!(store.purge_expired(1000), 1);
+        assert_eq!(store.purge_expired(1000).leases, 1);
         assert!(store.get(&stale).is_none());
         assert!(store.get(&live).is_some());
         // An entry exactly at `now` is treated as expired.
-        assert_eq!(store.purge_expired(5000), 1);
+        assert_eq!(store.purge_expired(5000).leases, 1);
         assert_eq!(store.iter().count(), 0);
     }
 
@@ -214,9 +228,10 @@ mod tests {
         assert!(store.is_quarantined(ip, 1000));
         // The boundary is treated as expired, matching lease semantics.
         assert!(!store.is_quarantined(ip, 2000));
-        // Purging past expiry forgets the entry.
+        // Purging past expiry forgets the entry and reports it.
         store.quarantine(ip, 2000);
-        store.purge_expired(3000);
+        let stats = store.purge_expired(3000);
+        assert_eq!(stats.quarantined, 1);
         assert!(!store.is_quarantined(ip, 0));
     }
 }

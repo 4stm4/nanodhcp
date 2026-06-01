@@ -44,8 +44,8 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
 
     let mut store = LeaseStore::load(&cfg.lease_file);
     let purged = store.purge_expired(time::now());
-    if purged > 0 {
-        log_info!("purged {} expired lease(s) at startup", purged);
+    if purged.leases > 0 {
+        log_info!("purged {} expired lease(s) at startup", purged.leases);
     }
     let mut next_purge = time::now() + PURGE_INTERVAL_SECS;
     let mut buf = [0u8; 1500];
@@ -66,11 +66,15 @@ pub fn run(cfg: DhcpConfig) -> io::Result<()> {
         let now = time::now();
         if now >= next_purge {
             let removed = store.purge_expired(now);
-            if removed > 0 {
-                log_info!("purged {} expired lease(s)", removed);
+            if removed.leases > 0 {
+                log_info!("purged {} expired lease(s)", removed.leases);
+                // Only lease changes need to reach disk; quarantine is in-memory.
                 if let Err(e) = store.save() {
                     log_warn!("cannot save leases: {}", e);
                 }
+            }
+            if removed.quarantined > 0 {
+                log_info!("released {} expired quarantine(s)", removed.quarantined);
             }
             next_purge = now + PURGE_INTERVAL_SECS;
         }
